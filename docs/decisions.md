@@ -1571,3 +1571,287 @@ entries go at the bottom. Format:
 - **Impact:** `reliability_core.h`'s `Statistics` struct — each field's
   granularity documented in its own comment, not left implicit.
 - **Phase/date:** Phase 4, 2026-08-17.
+
+## UCB1 is an additional ranking layer, never a replacement for distance-vector routing — resolving the guide's "alternative to" framing
+- **Decision:** implementation-guide.html §06 labels this stretch phase
+  "Implement UCB1 next-hop selection **as an alternative to** distance-
+  vector" — read literally, that could mean UCB1 replaces the routing
+  table's own selection logic entirely when enabled. This phase's actual
+  task instructions explicitly override that literal reading: "UCB1 must
+  NOT replace these mechanisms... it is an additional adaptive ranking
+  layer," ranking "only among valid candidates" that `routing_core` (via
+  the new `enumerateCandidates()`) already validated. Implemented that way
+  — `routing_core::selectNextHop()` (the Phase 1/2 distance-vector +
+  health selection) is completely unchanged; UCB1 only gets a chance to
+  override its *NORMAL-traffic* answer, and only among candidates routing
+  already independently considers legitimate.
+- **Reason:** This isn't a silent redesign of the guide — the task's own
+  current-message instructions (compile-time safety section, Part 4's
+  "must never create a route the normal routing layer would consider
+  invalid," Part 6's explicit layering diagram) resolve the ambiguity
+  directly and explicitly, in this exact conversation, not left for this
+  session to guess at. Following them is the literal instruction, not a
+  reinterpretation. It's also the only reading consistent with the guide's
+  own framing of this phase as "stretch, optional, only if ahead of
+  schedule" sitting on top of phases the guide's own CUT-LINE text treats
+  as "must all be working" (Hours 17-23) — a stretch feature swapping out
+  proven, required routing correctness would contradict that priority
+  ordering.
+- **Alternatives considered:** Implement UCB1 as a literal alternative
+  selection mode, replacing `routing_core::selectNextHop()`'s table lookup
+  entirely when `ENABLE_UCB1=1`.
+- **Why alternatives were rejected:** Would let a stretch, unproven,
+  intentionally-lightweight learning layer override 4 phases' worth of
+  proven, tested routing/health/priority/loop-safety logic — exactly what
+  this phase's own explicit instructions (and "compile-time safety"
+  section) forbid. Also directly contradicted by Part 4's "must never
+  create a route the normal routing layer would consider invalid," which
+  is meaningless if UCB1 can bypass routing's validity checks altogether.
+- **Impact:** `routing_core.h/.cpp` gained one new, purely additive
+  function (`enumerateCandidates()`); zero lines of `selectNextHop()`
+  changed. See `docs/architecture.md`'s Phase 5 section for the full
+  layering diagram.
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## UCB1 exploration coefficient: the standard sqrt(2), since the guide specifies none
+- **Decision:** `UCB1_EXPLORATION_C = sqrt(2) ≈ 1.41421356` (config.h),
+  used exactly as `meanReward + C * sqrt(ln(N)/n)` — the textbook UCB1
+  formula from Auer, Cesa-Bianchi & Fischer (2002), which this project's
+  own cited reference [10] ("Multi-Armed Bandit Algorithms in Next-
+  Generation Wireless Networks... a Lightweight, Stateless Alternative")
+  also frames as the standard baseline.
+- **Reason:** implementation-guide.html names this feature only as a
+  one-line stretch-phase label ("UCB1 multi-armed bandit next-hop
+  selection") with no formula, no coefficient, and no reward definition —
+  confirmed by a direct search of the guide's full text. Part 3 of this
+  phase's task spec explicitly instructs: "if the guide leaves a parameter
+  unspecified: centralize it, choose a defensible value, document the
+  decision." sqrt(2) is the original, most-cited, most-defensible choice
+  for exactly that situation — not an arbitrary pick.
+- **Alternatives considered:** A smaller/larger constant tuned for this
+  specific 5-node topology's traffic volume.
+- **Why alternatives were rejected:** No real traffic data exists yet
+  (no hardware) to tune against, and inventing a topology-specific
+  constant with no basis would be exactly the kind of unjustified
+  numeric guess this project's parameter-derivation convention avoids
+  wherever a real formula/reference exists instead.
+- **Impact:** `config.h`'s `UCB1_EXPLORATION_C`. Directly exercised by
+  `test_ucb1_core.cpp`'s worked-arithmetic tests (e.g.
+  `test_high_success_candidate_dominates`'s hand-computed 1.7739/0.8739
+  scores).
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## One UCB1 trial = one resolved hop-transmission SERIES, never an individual radio retry
+- **Decision:** `ucb1_core::recordOutcome()` is called exactly once per
+  hop-transmission's FINAL outcome — a real `MSG_ACK` match (success), or
+  retries genuinely exhausted / a synchronous send rejection (failure).
+  It is never called once per radio attempt. This reuses, rather than
+  reinvents, Phase 4's own already-established packet-series-vs-attempt
+  distinction (`reliability_core::Statistics.packetsDelivered`/
+  `packetsFailed` vs. `retries`) — the exact three reliability.cpp call
+  sites that already represent a series's FINAL state (`handleAck()`'s
+  match, `tick()`'s `FAILED` branch specifically — never its `RETRY`
+  branch — and `transmitHop()`'s synchronous-rejection `cancelTx()` path)
+  are the only three places `ucb1::onRouteOutcome()` is called.
+- **Reason:** Part 2 explicitly requires defining this precisely and
+  explicitly forbids counting every retry as an independent trial "unless
+  explicitly justified" — no justification exists for doing so here, and
+  a real one exists for NOT doing so: a UCB1 "trial" answering "did this
+  route deliver the packet" is a claim about the whole series's outcome,
+  not about one radio frame's fate (which is what PDR — a structurally
+  different, already-established, per-attempt metric — already measures;
+  see Phase 4's own "PDR is fed per-attempt, not per-packet" decision).
+  Conflating the two would make a route that needs frequent retries but
+  always eventually succeeds look identical, under UCB1, to one that fails
+  outright — exactly the kind of double-counting Part 9 (Phase 4) and
+  Part 2 (Phase 5) both warn against.
+- **Alternatives considered:** Feed UCB1 from the same per-attempt call
+  sites already feeding `predictor::onSendResult()`.
+- **Why alternatives were rejected:** Would inflate a route's trial count
+  by its retry count, systematically biasing UCB1's exploration term
+  (`sqrt(ln(N)/n)`) toward under-exploring flaky-but-eventually-reliable
+  routes relative to genuinely reliable ones — the reward signal a bandit
+  needs is "did the goal get achieved," not "how many radio frames did it
+  take," which is a distinct, already-served concern (PDR/link_score).
+- **Impact:** `reliability_core::AckResult` gained a `slot` field (so
+  `handleAck()` can recover the original packet's `destination` from the
+  adapter's own `g_pendingPackets[]` for the reward call — `reliability_core`
+  itself still never stores a destination). `test_reliability_core.cpp`'s
+  existing `AckResult` field-access tests are unaffected (a pure addition).
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## Candidate enumeration lives in routing_core as one new, purely additive function
+- **Decision:** `routing_core::enumerateCandidates()` is new, always
+  compiled (no `#if ENABLE_UCB1` gate at the `routing_core` level — see
+  the compile-time-safety entry below), and changes zero bytes of any
+  existing `routing_core` function. It reuses `selectNextHop()`'s own
+  NORMAL-mode validity rules (non-stale, excludes priority-only edges)
+  exactly, plus an optional `excludeNextHop` (Part 8's loop guard,
+  NODE_ID_UNKNOWN = no exclusion, the harmless default).
+- **Reason:** UCB1 ranking can only be as safe as the candidate list it's
+  given (Part 4). Rather than have `ucb1_core` or the `ucb1` adapter
+  re-derive routing validity/staleness/priority-only-edge rules
+  independently (risking the two implementations drifting out of sync —
+  a genuine correctness hazard for a routing-adjacent feature), the SAME
+  authoritative logic `selectNextHop()` already uses is reused via one new
+  read-only accessor. UCB1 structurally cannot invent a candidate
+  `routing_core` wouldn't already consider valid.
+- **Alternatives considered:** (a) Duplicate the validity-filtering logic
+  inside `ucb1_core`/`ucb1.cpp`, operating on its own copy of relevant
+  routing facts. (b) Expose `RoutingState` itself to `ucb1.cpp` directly.
+- **Why alternatives were rejected:** (a) is a maintenance/correctness
+  hazard — any future change to routing's validity rules would need to be
+  mirrored by hand in a second place, with no compiler help if someone
+  forgets. (b) `RoutingState` is `routing.cpp`'s own private, file-local
+  static — not part of any module's public API by design since Phase 1;
+  breaking that encapsulation for one caller would be a real architecture
+  regression. Instead, `routing.cpp` (which already owns `RoutingState`,
+  and already reads `predictor::isUnhealthy()` to build its own health
+  mask) calls `enumerateCandidates()` itself and hands the adapter-agnostic
+  result to `ucb1::selectNextHop()` as a plain array — the same
+  "adapter reads across into another adapter, cores stay decoupled"
+  pattern already established by routing.cpp's existing predictor
+  dependency.
+- **Impact:** `routing_core.h/.cpp` — one new struct (`CandidateInfo`), one
+  new function. Tested directly and unconditionally in
+  `test_routing_core.cpp` (tests 15/16), independent of `ENABLE_UCB1`.
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## Compile-time gating: ENABLE_UCB1=0 must be provably byte-identical to Phase 4, not just "probably fine"
+- **Decision:** Every UCB1-touching call site is wrapped in
+  `#if ENABLE_UCB1`, with the `#else`/no-flag branch being the EXACT prior
+  Phase 4 code (`routing.cpp`'s `getNextHopInternal()` is a straight
+  extraction of the old `getNextHop()` body, with UCB1 logic added only
+  inside a new `#if` block; `routing::selectNextHop(pkt)` calls
+  `getNextHopInternal(..., NODE_ID_UNKNOWN)` when disabled — identical to
+  calling the old `getNextHop()` directly). `ucb1.cpp`'s entire body is
+  wrapped in `#if ENABLE_UCB1 ... #endif`, compiling to an empty
+  translation unit when disabled, so nothing needs to link against it —
+  `reliability.cpp`'s three `ucb1::onRouteOutcome()` call sites are
+  themselves `#if ENABLE_UCB1`-gated for the same reason. `ucb1_core.h/.cpp`
+  and `routing_core::enumerateCandidates()` remain always-compiled (they're
+  pure, inert, and unreferenced by anything when disabled — no
+  ENABLE_UCB1 gate needed there at all, matching every other `*_core`
+  module's convention of never containing feature flags itself).
+- **Reason:** The task's own "compile-time safety" section states this as
+  close to an absolute requirement as this project has seen: "ENABLE_UCB1
+  = 0 must preserve the exact existing routing behavior." "Probably
+  behaves the same" isn't good enough for a requirement phrased that
+  precisely — the only way to actually GUARANTEE it is to make the
+  disabled code path literally unable to reference UCB1 at compile time,
+  not merely skip calling it at runtime via an `if` check.
+- **Alternatives considered:** A single runtime `if (ENABLE_UCB1)` check
+  inside one shared code path, with `ucb1.cpp` always compiled (providing
+  an inert stub when disabled) rather than conditionally compiled.
+- **Why alternatives were rejected:** A runtime check still means the
+  compiled binary CONTAINS UCB1 code and links against it even when
+  "disabled" — a latent risk (a stray future call site, a build
+  misconfiguration, a runtime flag flip) that compile-time exclusion
+  eliminates categorically. It would also make "exact existing behavior"
+  a runtime property to re-verify every time, rather than a structural
+  guarantee provable by inspection.
+- **Impact:** Both configurations were independently compiled via
+  `arduino-cli --warnings all` (Part 11) — `ENABLE_UCB1=0`: 906,948 bytes
+  flash / 47,664 bytes RAM, 0 errors/0 warnings; `ENABLE_UCB1=1`: 909,272
+  bytes flash / 48,064 bytes RAM, 0 errors/0 warnings — both clean on the
+  first attempt. The repository's committed default is restored to
+  `ENABLE_UCB1=0` after both were validated.
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## Loop prevention: excludeNextHop threaded through candidate enumeration, plus an unconditional final safety net
+- **Decision:** Two independent layers enforce Part 8's "must never create
+  a 2-node routing loop": (1) `routing_core::enumerateCandidates()` never
+  enumerates a candidate equal to `excludeNextHop`, and `ucb1_core::selectNextHop()`
+  independently refuses to return one too, even if it somehow appeared in
+  its input list; (2) `routing.cpp`'s `getNextHopInternal()` has an
+  unconditional final check — regardless of whether UCB1 or routing_core's
+  own baseline pick produced the answer, if it equals `excludeNextHop`,
+  the result is forced to `NODE_ID_UNKNOWN` rather than ever returned.
+  `excludeNextHop` is populated only when forwarding (`routing::selectNextHop(pkt)`
+  passes `pkt.prev_hop`) and only when `ENABLE_UCB1` — self-originated
+  sends (`routing::getNextHop()`) never have a prevHop to exclude.
+- **Reason:** Part 8 asks for a hard safety property ("must never"), not a
+  probabilistic one — two independent, redundant enforcement points is
+  deliberate defense-in-depth for a "must never" requirement, not
+  over-engineering. Restricting the exclusion's real effect to
+  `ENABLE_UCB1` only (rather than always applying it, even when UCB1 is
+  disabled) is the more conservative reading of the compile-time-safety
+  requirement above — Phase 4's own `routing_core::selectNextHop()` has no
+  such exclusion and was never asked to gain one, so applying it
+  unconditionally would technically change "existing routing behavior,"
+  even though analysis shows it's extremely unlikely to ever change a real
+  decision in this topology (see the specific reasoning this decision
+  supersedes in the "routing_core split" era discussion — kept out of the
+  disabled path purely out of maximal conservatism, not because it was
+  shown to be risky).
+- **Alternatives considered:** Add a hop-count/TTL field to `MeshPacket`
+  instead, matching classic loop-prevention designs.
+- **Why alternatives were rejected:** Would be the first new `MeshPacket`
+  field since Phase 0 (Phase 4 already revisited and explicitly declined
+  this for its own forwarding loop-guard — see
+  [decisions.md](decisions.md#forwarding-loop-prevention-relies-on-routing_core-correctness--a-next-hop-not-prev-hop-guard--the-duplicate-filter--no-new-ttl-field)),
+  and Part 8 itself explicitly says "if a TTL field is still unnecessary,
+  preserve that decision" — the existing `nextHop != prevHop`-shaped guard
+  (already proven sufficient for Phase 4's own forwarding) extends cleanly
+  to UCB1's specific new risk (a learned preference selecting the
+  bounce-back candidate) without a wire-format change.
+- **Impact:** `routing.cpp`'s `getNextHopInternal()`/`applyUcb1Ranking()`;
+  `ucb1_core::selectNextHop()`'s `excludeNextHop` parameter. Tested
+  directly at both layers: `test_routing_core.cpp` test 16
+  (`enumerateCandidates` exclusion) and `test_ucb1_core.cpp` tests 8/9
+  (`excludeNextHop` rejection, explicit two-node-loop scenario).
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## No decay — fixed, unbounded-in-time (but bounded-in-size) counters are sufficient
+- **Decision:** `ucb1_core::ArmStats` counters accumulate for the whole
+  program's lifetime with no time-based decay, aging, or windowing. Memory
+  is bounded by structure (fixed `NODE_ID_COUNT x NODE_ID_COUNT` array),
+  not by discarding old observations.
+- **Reason:** implementation-guide.html specifies no decay mechanism for
+  this stretch feature (confirmed — the guide's only UCB1 content is the
+  one-line label and roadmap bullets already cited elsewhere in this
+  file), and Part 7 explicitly permits this: "do NOT introduce complicated
+  decay unless the guide requires it... if no decay is required, fixed
+  counters are acceptable." For a 5-node topology where link conditions
+  are relatively stable over a hackathon demo's timescale (not a
+  large-scale, slowly-drifting production network), indefinitely
+  accumulating evidence is a reasonable default — a route's long-run
+  track record IS its best available estimate of quality, absent evidence
+  that conditions have fundamentally changed.
+- **Alternatives considered:** A sliding-window or exponentially-decaying
+  reward estimate (mirroring the EWMA approach already used for RSSI/PDR
+  in `predictor_core`).
+- **Why alternatives were rejected:** Not required by the guide, and would
+  add real complexity (a time source, a decay/window constant needing its
+  own justification, more state per arm) for a stretch feature this
+  project's own workflow rules already treat as lower-priority than the
+  four required phases before it. If real hardware testing later shows
+  stale history causing UCB1 to make bad calls after a genuine link
+  condition change, decay is a well-scoped, isolated follow-up — not
+  something to build speculatively now.
+- **Impact:** `ucb1_core::Ucb1State` has no timestamp field at all —
+  `recordOutcome()` doesn't even take a `now` parameter, unlike every
+  other `*_core` module's mutating functions.
+- **Phase/date:** Phase 5, 2026-08-17.
+
+## UCB1 ranks purely on reward + exploration, deliberately ignoring hop count
+- **Decision:** `ucb1_core::Candidate.hopCount` is carried through for
+  diagnostics/logging only — `ucb1_core::selectNextHop()`'s ranking
+  formula never reads it.
+- **Reason:** The entire point of this stretch feature is letting real,
+  learned delivery evidence override the static hop-count heuristic when
+  the evidence supports it (Part 2: "prefer a reward that represents
+  actual route quality"). If hop count gated or weighted the score, UCB1
+  would just be re-deriving distance-vector's own preference with extra
+  steps, never actually able to demonstrate its purpose (Part 10 test 4/5:
+  a worse-hop-count-but-more-reliable candidate must be able to win).
+- **Alternatives considered:** Weight the UCB1 score by hop count (e.g.
+  penalize higher-hop-count candidates).
+- **Why alternatives were rejected:** Would reintroduce exactly the static
+  bias this feature exists to move beyond, and the guide/task spec give no
+  formula or reason to combine the two — inventing one would be
+  unjustified complexity.
+- **Impact:** `test_ucb1_core.cpp`'s `test_historical_success_influences_selection`
+  directly demonstrates a 3-hop candidate with strong history beating a
+  2-hop candidate with poor history.
+- **Phase/date:** Phase 5, 2026-08-17.

@@ -20,9 +20,9 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 4 complete** (2026-08-17) — hop-by-hop reliable unicast delivery
-(packet identity, ACK, bounded retry, duplicate filter, forwarding, live
-PDR wiring), on top of the Phase 0-3 firmware foundation. See
+**Phase 5 complete** (2026-08-17) — UCB1 adaptive next-hop ranking, a
+**stretch, optional feature disabled by default** (`ENABLE_UCB1=0` in
+`src/config.h`), on top of the Phase 0-4 firmware foundation. See
 [`docs/phase-log.md`](docs/phase-log.md) for the full record.
 
 A **GUI implementation now exists in this repository**, under
@@ -58,22 +58,32 @@ transmission, an explicit application-level `MSG_ACK` distinct from the
 raw ESP-NOW send callback, bounded retry with deterministic timeout, a
 TTL-expiring duplicate filter, minimum loop-safe forwarding via the
 existing routing decision, and — for the first time — `predictor`'s PDR
-fed by real per-attempt delivery outcomes (Phase 4). Routing, predictor,
-anomaly, and reliability all keep the Arduino-free-core / thin-adapter
-split (`src/routing/`, `src/predictor/`, `src/anomaly/`,
-`src/reliability/`, each `*_core.h/.cpp` + adapter `.h/.cpp`), each
-unit-tested with a host-compiled g++ harness — 21/21 (routing), 31/31
-(predictor), 50/50 (anomaly), 88/88 (reliability) — **190/190 total**, see
-`docs/testing.md`. As of Phase 4, the **whole Phase 0+1+2+3+4 sketch has
-also been compiled for real** against the installed `esp32:esp32` core
-3.3.11 (`arduino-cli`) — 0 errors, 0 warnings.
+fed by real per-attempt delivery outcomes (Phase 4). And now, optionally
+(`ENABLE_UCB1=1`), a UCB1 multi-armed-bandit layer that RANKS — never
+replaces — NORMAL-traffic candidates routing already validated, learning
+from real Phase 4 delivery outcomes (one trial per resolved hop-
+transmission series, never per retry), with link-health preference and
+loop-prevention both preserved and priority traffic structurally untouched
+(Phase 5). Routing, predictor, anomaly, reliability, and UCB1 all keep the
+Arduino-free-core / thin-adapter split (`src/routing/`, `src/predictor/`,
+`src/anomaly/`, `src/reliability/`, `src/ucb1/`, each `*_core.h/.cpp` +
+adapter `.h/.cpp`), each unit-tested with a host-compiled g++ harness —
+28/28 (routing), 31/31 (predictor), 50/50 (anomaly), 88/88 (reliability),
+26/26 (ucb1) — **223/223 total**, see `docs/testing.md`. As of Phase 5,
+the **whole Phase 0+1+2+3+4+5 sketch has been compiled for real in BOTH
+`ENABLE_UCB1=0` and `ENABLE_UCB1=1` configurations** against the installed
+`esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings, both
+times. The repository's committed default is `ENABLE_UCB1=0`.
 
 What's stubbed (interfaces only, no algorithms): `telemetry/`. Also not
 yet built: any automatic caller of `reliability::send()` (the mechanism is
 real and tested, but no real application data source was invented — see
-`docs/decisions.md`), OLED wiring for the anomaly flags (Node C —
-deferred, same reasoning as Phase 0's original OLED deferral), and JSON
-serialization of any telemetry (the GUI's contract, or otherwise). See
+`docs/decisions.md`) — this also means UCB1's bandit tables have nothing
+to learn from yet even when enabled, since its reward signal comes
+entirely from `reliability::send()`'s outcomes; OLED wiring for the
+anomaly flags (Node C — deferred, same reasoning as Phase 0's original
+OLED deferral); and JSON serialization of any telemetry (the GUI's
+contract, or otherwise, including UCB1's own diagnostic state). See
 `docs/decisions.md`.
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
@@ -90,12 +100,14 @@ validates that the firmware *builds*; nothing has run on real silicon yet
 
 **Waiting on explicit go-ahead for whatever comes next** — do not start
 anything unprompted. Phase 0-4 covers implementation-guide.html §06's
-"required, not stretch" roadmap through Hours 17-23. Candidates for what
-comes next (none started, none scoped): UCB1 (explicitly deferred every
-phase so far), the final telemetry/reporting system (the natural point to
-decide what real `MSG_DATA` application traffic should flow and wire
-`reliability::send()`/`getStatistics()` into the now-real GUI telemetry
-contract), and OLED wiring (deferred since Phase 0).
+"required, not stretch" roadmap through Hours 17-23; Phase 5 is that
+roadmap's only named stretch feature (Hours 23-28), now implemented and
+disabled by default. Candidates for what comes next (none started, none
+scoped): the final telemetry/reporting system (the natural point to
+decide what real `MSG_DATA` application traffic should flow — resolving
+the shared Phase 4/5 "no live caller" gap — and wire
+`reliability::getStatistics()`/UCB1 diagnostics into the now-real GUI
+telemetry contract), and OLED wiring (deferred since Phase 0).
 
 Things worth rereading before starting whatever's next:
 - [`docs/decisions.md`](docs/decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented) —
@@ -103,7 +115,14 @@ Things worth rereading before starting whatever's next:
   wiring) is real and tested, but nothing calls `reliability::send()`
   automatically yet; deciding what real application data a node should
   send, to whom, and how often is a real, undecided design question — not
-  something to invent unprompted.
+  something to invent unprompted. UCB1 (Phase 5) inherits this exact same
+  gap — its bandit tables stay empty until this is resolved, even with
+  `ENABLE_UCB1=1`.
+- **`ENABLE_UCB1` must stay `0` (disabled) unless explicitly asked
+  otherwise** — it's a stretch feature the guide itself only wants enabled
+  "if ahead of schedule," and every UCB1-touching code path was built to
+  be provably byte-identical to Phase 4 when disabled. Don't flip the
+  default without being asked.
 - [`docs/decisions.md`](docs/decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule) —
   `routing_core::isPriorityOnlyEdge`'s hard exclusion is still active
   alongside real link-health-aware selection, specifically because no

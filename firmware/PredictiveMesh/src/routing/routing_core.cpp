@@ -156,4 +156,25 @@ uint8_t buildAdvertisement(const RoutingState& state, RouteAdEntry* out, uint8_t
   return n;
 }
 
+uint8_t enumerateCandidates(const RoutingState& state, NodeId destination,
+                             const bool* neighborUnhealthy, NodeId excludeNextHop,
+                             CandidateInfo* out, uint8_t maxOut) {
+  if (destination >= NODE_ID_COUNT || destination == state.self) return 0;
+
+  uint8_t n = 0;
+  for (uint8_t via = 0; via < NODE_ID_COUNT && n < maxOut; via++) {
+    const RouteCandidate& cand = state.candidates[destination][via];
+    if (!cand.valid) continue;
+    if (isPriorityOnlyEdge(state.self, static_cast<NodeId>(via))) continue;
+    if (static_cast<NodeId>(via) == excludeNextHop) continue;
+
+    bool unhealthy = neighborUnhealthy != nullptr && neighborUnhealthy[via];
+    out[n].nextHop = static_cast<NodeId>(via);
+    out[n].hopCount = cand.hop_count;
+    out[n].healthy = !unhealthy;
+    n++;
+  }
+  return n;
+}
+
 }  // namespace routing_core

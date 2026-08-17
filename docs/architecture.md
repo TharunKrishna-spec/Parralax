@@ -1,7 +1,9 @@
 # Architecture
 
-Status: **Phase 4 — transport + routing + predictor + anomaly + reliability
-real, telemetry still a stub.** This document describes what exists
+Status: **Phase 5 — transport + routing + predictor + anomaly + reliability
+real; UCB1 adaptive routing implemented as an optional, compile-time-gated
+stretch layer (disabled by default); telemetry still a stub.** This
+document describes what exists
 now and the shape it's built to grow into. It does not describe algorithms
 that aren't implemented yet — see [known-issues.md](known-issues.md) for
 those.
@@ -57,6 +59,7 @@ Bottom to top, matching implementation-guide.html §01:
 | Routing (distance-vector + priority override + link-health-aware selection) | **Implemented** (Phase 1, extended Phase 2) | `src/routing/` |
 | Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
+| UCB1 adaptive ranking (stretch, optional) | **Implemented, disabled by default** (Phase 5) | `src/ucb1/` |
 | Reporting (OLED + Serial/WebSerial) | Stub interface only | `src/telemetry/` |
 
 Data is meant to flow bottom-up: raw radio -> statistics -> routing
@@ -107,14 +110,18 @@ firmware/PredictiveMesh/
     ├── reliability/
     │   ├── reliability_core.h/.cpp   <- pure packet-identity/dup-filter/retry/timeout/statistics algorithm, no Arduino dependency
     │   └── reliability.h/.cpp        <- Arduino-facing adapter (MeshPacket construction/parsing, transport::send, millis/logger)
+    ├── ucb1/
+    │   ├── ucb1_core.h/.cpp   <- pure bandit-statistics/UCB1-selection algorithm, no Arduino dependency, always compiled
+    │   └── ucb1.h/.cpp        <- Arduino-facing adapter; .cpp body entirely `#if ENABLE_UCB1`-gated (config.h)
     └── telemetry/     <- stub
 
 firmware/PredictiveMesh/test/
-├── test_routing_core.cpp      <- host-compiled (g++) unit tests for routing_core
+├── test_routing_core.cpp      <- host-compiled (g++) unit tests for routing_core (incl. Phase 5's enumerateCandidates)
 ├── test_predictor_core.cpp    <- host-compiled (g++) unit tests for predictor_core
 ├── test_anomaly_core.cpp      <- host-compiled (g++) unit tests for anomaly_core
-└── test_reliability_core.cpp  <- host-compiled (g++) unit tests for reliability_core
-                                   see docs/testing.md for all four
+├── test_reliability_core.cpp  <- host-compiled (g++) unit tests for reliability_core
+└── test_ucb1_core.cpp         <- host-compiled (g++) unit tests for ucb1_core
+                                   see docs/testing.md for all five
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -462,6 +469,105 @@ doesn't support that yet (`telemetry.cpp` is still the Phase 0 stub).
 **Routing interaction (Part 12).** `application -> routing::selectNextHop()
 -> reliability::send()/forwarding -> transport::send()`. Reliability reads
 routing's decision; it never writes to or bypasses it.
+
+## UCB1 adaptive routing (Phase 5 — stretch, optional)
+
+implementation-guide.html §06 labels this "[stretch, optional] UCB1
+multi-armed bandit next-hop selection... only if ahead of schedule" — the
+only stretch feature named in the guide's own roadmap, and the only layer
+in this firmware that's disabled by default (`ENABLE_UCB1=0`, config.h).
+`src/ucb1/` follows the same pure-core/adapter split as every other layer:
+
+- **`ucb1_core.h`/`.cpp`** — the real algorithm: a fixed-size
+  `[destination][nextHop]` bandit-statistics table
+  (`ArmStats{everObserved, attempts, successes, failures}`), the standard
+  UCB1 selection formula, health-tiering, and the loop-prevention
+  exclusion. Zero Arduino dependency, and — unlike the adapter — **always
+  compiled**, regardless of `ENABLE_UCB1`, exactly like every other
+  `*_core` module. This is what
+  `firmware/PredictiveMesh/test/test_ucb1_core.cpp` compiles and runs
+  directly with a host compiler.
+- **`ucb1.h`/`.cpp`** — the thin Arduino-facing adapter. `ucb1.h`'s
+  declarations always exist; `ucb1.cpp`'s entire function-body content is
+  wrapped in `#if ENABLE_UCB1 ... #endif`, compiling to an empty
+  translation unit when disabled.
+
+**Why UCB1 is optional and never replaces existing routing.**
+implementation-guide.html's own phrase — "as an alternative to
+distance-vector" — could be read as UCB1 replacing the routing table
+outright. This phase's actual instructions explicitly override that
+literal reading: UCB1 is "an additional adaptive ranking layer" that
+"ranks only among valid candidates," never able to "create a route the
+normal routing layer would consider invalid." See
+[decisions.md](decisions.md#ucb1-is-an-additional-ranking-layer-never-a-replacement-for-distance-vector-routing--resolving-the-guides-alternative-to-framing)
+for the full reasoning.
+
+**The decision pipeline** (route validity → link-health → routing policy
+→ UCB1 ranking → next hop), for NORMAL traffic only, with `ENABLE_UCB1=1`:
+
+```
+routing::getNextHopInternal(destination, priority=false, excludeNextHop)
+  1. routing_core::selectNextHop() computes its own Phase 1/2 baseline
+     pick (unchanged — this call is identical whether or not UCB1 runs).
+  2. routing_core::enumerateCandidates() lists every currently-valid,
+     non-priority-only-edge, non-excluded candidate, health-annotated.
+  3. ucb1::selectNextHop() -> ucb1_core::selectNextHop():
+       a. drop any candidate == excludeNextHop (Part 8 loop guard)
+       b. if any surviving candidate is healthy, rank ONLY the healthy
+          subset (Part 6 — preserves Phase 2's own philosophy exactly)
+       c. any zero-observation candidate wins immediately (Part 3)
+       d. otherwise: argmax(meanReward + C*sqrt(ln(N)/n)), ties -> lowest NodeId
+  4. If UCB1 returned a real candidate, it REPLACES the baseline pick from
+     step 1; otherwise step 1's answer stands unchanged.
+  5. Absolute safety net: if the final answer == excludeNextHop for any
+     reason, it becomes NODE_ID_UNKNOWN (no route) instead.
+```
+
+For PRIORITY traffic, or with `ENABLE_UCB1=0`, only step 1 runs — this is
+exactly Phase 4's original `getNextHop()` body, unchanged.
+
+**Reward definition (Part 2).** One UCB1 trial = one resolved
+hop-transmission SERIES's final outcome (a real `MSG_ACK` match, or
+retries genuinely exhausted / a synchronous send rejection) — never an
+individual radio retry. This reuses Phase 4's own already-established
+packet-series-vs-attempt distinction rather than inventing a new boundary.
+`reliability.cpp` calls `ucb1::onRouteOutcome(destination, nextHop, success)`
+at exactly the three points that already represent a series's final state.
+See [decisions.md](decisions.md#one-ucb1-trial--one-resolved-hop-transmission-series-never-an-individual-radio-retry).
+
+**Zero-observation handling & determinism (Part 3/9).** An untried
+candidate is always chosen first (standard forced-exploration UCB1
+practice), which also structurally guarantees `N` (the total-trials term)
+can never be 0 when the formula is actually evaluated — no undefined
+`ln(0)` or divide-by-zero is possible. No randomness anywhere — identical
+inputs always produce the identical selection.
+
+**Link health (Part 6) & priority (Part 5).** Health-tiering happens
+inside the same `ucb1_core::selectNextHop()` call, before ranking — a
+candidate can never win UCB1 ranking purely on historical success while
+currently unhealthy. Priority traffic never reaches UCB1 at all — it's a
+structural fact (the caller never invokes `ucb1::selectNextHop()` when
+`priority==true`), not a runtime check that could be bypassed.
+
+**Loop prevention (Part 8).** Two independent, redundant layers: candidate
+enumeration never includes the excluded next-hop, `ucb1_core::selectNextHop()`
+also refuses to return it even if it somehow appeared, and
+`getNextHopInternal()` has one final unconditional check regardless of
+which path produced the answer. No `MeshPacket` field was added — see
+[decisions.md](decisions.md#loop-prevention-excludenexthop-threaded-through-candidate-enumeration-plus-an-unconditional-final-safety-net).
+
+**No decay (Part 7).** `ArmStats` counters accumulate for the program's
+whole lifetime; memory is bounded by structure (fixed `NODE_ID_COUNT x
+NODE_ID_COUNT` array), not by discarding old observations. Not required by
+the guide, and not built speculatively — see
+[decisions.md](decisions.md#no-decay--fixed-unbounded-in-time-but-bounded-in-size-counters-are-sufficient).
+
+**Known limitation.** UCB1's ranking deliberately ignores hop count
+entirely (see decisions.md) — the whole point is letting learned evidence
+override the static heuristic. This also means, on a fresh boot with no
+history, UCB1's zero-observation forced-exploration could pick a
+worse-hop-count candidate first before any evidence exists to prefer
+otherwise — an expected, bounded cost of exploration, not a bug.
 
 ## Practical theory notes
 

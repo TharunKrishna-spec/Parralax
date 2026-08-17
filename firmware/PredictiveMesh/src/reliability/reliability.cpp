@@ -5,6 +5,7 @@
 #include "../routing/routing.h"
 #include "../predictor/predictor.h"
 #include "../transport/espnow_transport.h"
+#include "../ucb1/ucb1.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -94,6 +95,12 @@ bool transmitHop(MeshPacket& pkt, NodeId nextHop) {
                  nodeName(nextHop), nodeName(source), static_cast<unsigned>(pkt.sequence));
     reliability_core::cancelTx(g_state, slot);
     fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, nextHop, 1);
+#if ENABLE_UCB1
+    // Part 2 (Phase 5): a real, final, per-series delivery failure —
+    // exactly the granularity UCB1 rewards are defined at (never per
+    // retry). See docs/decisions.md.
+    ucb1::onRouteOutcome(static_cast<NodeId>(pkt.destination), nextHop, false);
+#endif
     return false;
   }
 
@@ -127,6 +134,14 @@ void handleAck(const MeshPacket& pkt) {
   // Part 8: the real PDR observation source — per-attempt, per-hop, via
   // the predictor's own clean API. See docs/decisions.md.
   predictor::onSendResult(r.nextHop, true);
+
+#if ENABLE_UCB1
+  // Part 2 (Phase 5): a real, final, per-series delivery success. `r.slot`
+  // recovers the original packet's destination from the adapter's own
+  // parallel byte storage — reliability_core itself never stores a
+  // destination (see reliability_core.h).
+  ucb1::onRouteOutcome(static_cast<NodeId>(g_pendingPackets[r.slot].destination), r.nextHop, true);
+#endif
 }
 
 void handleData(const MeshPacket& pkt, int8_t rssi) {
@@ -220,6 +235,12 @@ void tick() {
                    static_cast<unsigned>(te.id.sequence), nodeName(te.nextHop));
       fireEvent(ReliabilityEventType::PACKET_DROP, te.id.source, te.id.sequence, te.nextHop, te.attemptCount);
       predictor::onSendResult(te.nextHop, false);
+#if ENABLE_UCB1
+      // Part 2 (Phase 5): retries exhausted — a real, final, per-series
+      // delivery failure (never fired for the intermediate RETRY branch
+      // above, which is an attempt-level signal, not a series outcome).
+      ucb1::onRouteOutcome(static_cast<NodeId>(g_pendingPackets[te.slot].destination), te.nextHop, false);
+#endif
     }
   }
 }

@@ -282,6 +282,28 @@
 #define RELIABILITY_DUP_CACHE_TTL_MS 2000
 
 // ============================================================
+// UCB1 ADAPTIVE ROUTING (Phase 5 — stretch, optional)
+// ============================================================
+// Compile-time feature flag. implementation-guide.html §06 frames this as
+// "[stretch, optional] ... only if ahead of schedule" and explicitly says
+// to "gate it behind a compile flag so it can be disabled instantly if
+// unstable." 0 (disabled) is the required default — with it at 0, every
+// call site that would touch UCB1 is compiled out entirely (not just
+// skipped at runtime), so Phase 1/2/4's routing/reliability behavior is
+// byte-for-byte what it was before this phase. Flip to 1 to compile UCB1
+// in. See docs/decisions.md.
+#define ENABLE_UCB1 0
+
+// UCB1 exploration coefficient (the `C` in `meanReward + C * sqrt(ln(N)/n)`).
+// implementation-guide.html names UCB1 only as a stretch-phase label with
+// no formula or coefficient given. `sqrt(2)` is the standard textbook
+// value (Auer, Cesa-Bianchi & Fischer 2002's original UCB1 derivation,
+// also the framing of this project's own cited reference [10]) — used
+// as-is rather than inventing a different constant with no basis. See
+// docs/decisions.md.
+#define UCB1_EXPLORATION_C 1.41421356f
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

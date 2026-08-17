@@ -4,6 +4,124 @@ No physical hardware exists yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 5 — UCB1 adaptive routing (stretch, optional), actually compiled and run (host g++) + real ESP32 compile, BOTH configurations
+
+### 1. Host tests (bandit statistics + UCB1 selection formula)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/ucb1/ucb1_core.cpp test_ucb1_core.cpp -o test_ucb1_core
+(clean compile, zero warnings)
+$ ./test_ucb1_core
+... (26 checks, see below)
+26/26 checks passed
+EXIT_CODE=0
+```
+
+16 test functions, hand-verified against the actual UCB1 formula (see the
+comments in `test/test_ucb1_core.cpp` for the worked arithmetic — e.g.
+`test_high_success_candidate_dominates`'s exact 1.7739 vs. 0.8739 scores):
+
+| # | Part 10 scenario | Test |
+|---|---|---|
+| 2 | First observation handled correctly | `test_first_observation_recorded_correctly` |
+| 3 | Zero-observation candidate receives exploration priority | `test_zero_observation_gets_priority` |
+| 4 | High-success candidate eventually dominates | `test_high_success_candidate_dominates` |
+| 5 | Poor candidate does not dominate indefinitely | `test_poor_candidate_does_not_dominate_indefinitely` |
+| 6 | Historical success influences selection | `test_historical_success_influences_selection` |
+| 7 | Current unhealthy link not selected merely for historical success | `test_unhealthy_link_not_selected_despite_history` |
+| 9 | Invalid candidate never selected | `test_never_selects_a_candidate_not_provided` |
+| 10 | Stale candidate never selected | (same test — a stale candidate is simply never in the offered list) |
+| 11 | nextHop == prevHop is rejected | `test_exclude_next_hop_rejects_prev_hop` |
+| 12 | Two-node loop scenario is prevented | `test_two_node_loop_prevented` |
+| 13 | Retry attempts do not inflate UCB1 trials | `test_retries_do_not_inflate_trials` |
+| 14 | Successful delivery produces the correct reward | `test_successful_delivery_correct_reward` |
+| 15 | Failed delivery produces the correct reward | `test_failed_delivery_correct_reward` |
+| 16 | Multiple destinations maintain independent learning state | `test_independent_state_per_destination` |
+| 17 | Multiple next hops maintain independent statistics | `test_independent_state_per_next_hop` |
+| 18 | Counter overflow is safely handled | `test_counter_overflow_saturates` |
+| 19 | Fixed-size memory remains bounded | `test_fixed_size_memory_and_bounds_safety` |
+
+**Tests 1 and 8 are not pure-core tests** — see `test_ucb1_core.cpp`'s own
+top comment for why (`ucb1_core` has no concept of "priority" at all, and
+is a structurally separate module from `routing_core` with zero
+dependency either direction). They're verified differently:
+- **Test 1 ("UCB1 disabled preserves existing routing"):** the unchanged,
+  still-passing `test_routing_core.cpp` suite (28/28, including the 2 new
+  Phase 5 tests for `enumerateCandidates()` itself) IS the evidence —
+  `routing_core::selectNextHop()` has zero lines changed, and
+  `routing.cpp`'s `#if ENABLE_UCB1` gating makes the disabled path
+  identical to Phase 4's, by code inspection (see
+  [decisions.md](decisions.md#compile-time-gating-enable_ucb10-must-be-provably-byte-identical-to-phase-4-not-just-probably-fine)).
+- **Test 20 ("disabling UCB1 reproduces Phase 1/2 routing decisions"):**
+  same evidence as test 1.
+- **Test 8 ("priority traffic ignores UCB1"):** verified by code review —
+  `routing.cpp`'s `applyUcb1Ranking()` is only ever called inside
+  `if (!priority)`; the real ESP32 compile below confirms it links/runs.
+
+Two new tests were also added to `test_routing_core.cpp` for the new,
+always-compiled `routing_core::enumerateCandidates()` function itself
+(not gated behind `ENABLE_UCB1` — see decisions.md):
+
+| # | Scenario | Test |
+|---|---|---|
+| 15 | Lists every valid NORMAL candidate, excludes priority-only edges, annotates health | `test_enumerate_candidates_lists_valid_normal_candidates` |
+| 16 | Respects `excludeNextHop` — the Phase 5 loop-prevention guard | `test_enumerate_candidates_excludes_given_next_hop` |
+
+Re-ran the full existing suite alongside these to confirm nothing
+regressed: `test_routing_core` 28/28 (18 Phase 1 + 2 Phase 2 + 2 new Phase
+5 test functions, 28 total `check()` assertions), `test_predictor_core`
+31/31, `test_anomaly_core` 50/50, `test_reliability_core` 88/88,
+`test_ucb1_core` 26/26 — **223/223 total, all five host suites, actually
+run.**
+
+**What this is not:** no real ESP-NOW, no real delivery outcomes, no
+simulated multi-node interaction — every input is a hand-constructed
+candidate list/outcome sequence, every expected score worked by hand
+against the actual UCB1 formula. `ucb1.cpp` (the Arduino-facing adapter)
+and `routing.cpp`'s new UCB1-integration code are untested by this
+harness — reviewed by hand, validated by the real ESP32 compile below
+(both configurations).
+
+### 2. Real ESP32 compilation — BOTH configurations (Part 11)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=0 (default)
+Sketch uses 906948 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 47664 bytes (14%) of dynamic memory, leaving 280016 bytes for local variables. Maximum is 327680 bytes.
+```
+
+```
+# config.h temporarily edited to ENABLE_UCB1=1
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=1
+Sketch uses 909272 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48064 bytes (14%) of dynamic memory, leaving 279616 bytes for local variables. Maximum is 327680 bytes.
+# config.h restored to ENABLE_UCB1=0 (required default) and re-verified — identical
+# byte counts to the first compile above, confirming an exact restore.
+```
+
+**Both configurations compiled clean on the first attempt — 0 errors, 0
+warnings, `esp32:esp32` core 3.3.11.** `ENABLE_UCB1=1` adds 2,324 bytes
+flash / 400 bytes RAM over the disabled build (the `ucb1_core`/`ucb1`
+adapter code and the `Ucb1State` bandit table actually linking in) — a
+small, expected footprint. `enumerateCandidates()` and `ucb1_core` itself
+are always compiled (91-byte flash difference between Phase 4's own
+number and this phase's `ENABLE_UCB1=0` build), which is expected per the
+"always compiled, never gated" design for pure `*_core` modules.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (all 5 suites) | **verified** — 223/223, see above |
+| ESP32 COMPILATION, `ENABLE_UCB1=0` (default) | **verified** — clean, 0 warnings, 0 errors |
+| ESP32 COMPILATION, `ENABLE_UCB1=1` | **verified** — clean, 0 warnings, 0 errors |
+| PHYSICAL HARDWARE | **not yet verified** — no boards exist; see "Hardware-dependent tests" below |
+
+**No live traffic to learn from, same as Phase 4:** UCB1's reward signal
+comes from `reliability::send()`'s outcomes, and nothing calls that
+automatically yet (see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+Even with `ENABLE_UCB1=1` compiled in, the bandit tables would stay empty
+on a real boot until that gap is resolved.
+
 ## Phase 4 — hop-by-hop reliable delivery, actually compiled and run (host g++) + real ESP32 compile
 
 ### 1. Host tests (packet identity + duplicate filter + retry/timeout + statistics)
@@ -466,6 +584,11 @@ All marked **NOT RUN — HARDWARE NOT AVAILABLE**, per
 - [ ] A real hop-by-hop retry actually fires after a genuine dropped frame
 - [ ] Real forwarding across 2+ hops (e.g. A -> C -> D -> S) delivers correctly
 - [ ] PDR observed from real hardware send/ACK outcomes (not just the wired mechanism)
+- [ ] `ENABLE_UCB1=1` flashed to real boards, real delivery outcomes
+      recorded into the bandit tables, and a real preference shift observed
+      (e.g. a historically-poor path stops being chosen)
+- [ ] `UCB1_EXPLORATION_C` (currently the textbook `sqrt(2)`) tuned against
+      real hardware traffic patterns if warranted
 
 No fake or predicted results are recorded for any of the above. Do not
 mark any of these as passed until they've actually run on real hardware.
@@ -477,11 +600,14 @@ meaningful test beyond "does it compile and return its documented safe
 default" — there's no algorithm behind it yet to verify.
 `routing::selectNextHop()`/`getNextHop()` are no longer in this category as
 of Phase 1, `predictor::linkScore()`/`isUnhealthy()` as of Phase 2,
-`anomaly::evaluate()`/the sensor state machine as of Phase 3, and
+`anomaly::evaluate()`/the sensor state machine as of Phase 3,
 `reliability`'s packet identity/ACK/retry/duplicate-filter/forwarding as of
-Phase 4 — see the four *_core test suites above. The one real gap left
-anywhere in this stack is `reliability::send()`'s live *caller* (not its
+Phase 4, and `ucb1_core`'s bandit statistics/selection formula as of Phase
+5 — see the five *_core test suites above. The one real gap left anywhere
+in this stack is `reliability::send()`'s live *caller* (not its
 mechanism) — see
 [decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented),
-the same category of gap Phase 2 documented and accepted for PDR itself,
-now resolved one layer up.
+the same category of gap Phase 2 documented and accepted for PDR itself.
+Phase 5 inherits this exact same gap one layer further up: even with
+`ENABLE_UCB1=1`, the bandit tables have nothing to learn from until that
+caller exists.

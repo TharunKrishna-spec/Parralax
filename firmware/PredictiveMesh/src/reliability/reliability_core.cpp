@@ -80,12 +80,12 @@ AckResult onAckReceived(ReliabilityState& state, NodeId source, uint16_t sequenc
       state.stats.acknowledgements++;
       state.stats.lastLatencyMs = latency;
 
-      return AckResult{ true, nextHop, latency };
+      return AckResult{ true, nextHop, latency, i };
     }
   }
   // No matching pending entry — a stale, duplicate, or unknown ACK. Never
   // fabricate a match; state is left untouched (Part 3).
-  return AckResult{ false, NODE_ID_UNKNOWN, 0 };
+  return AckResult{ false, NODE_ID_UNKNOWN, 0, INVALID_SLOT };
 }
 
 uint8_t tickTimeouts(ReliabilityState& state, uint32_t now, TimeoutEvent* out, uint8_t maxOut) {

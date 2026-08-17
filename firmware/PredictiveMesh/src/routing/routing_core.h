@@ -125,4 +125,36 @@ NodeId selectNextHop(const RoutingState& state, NodeId destination, bool priorit
                       uint8_t* outHopCount = nullptr,
                       const bool* neighborUnhealthy = nullptr);
 
+// ============================================================
+// Phase 5 (UCB1, stretch/optional) — purely additive. Does not change
+// selectNextHop() or any existing behavior above; always compiled and
+// host-testable regardless of ENABLE_UCB1 (see config.h), exactly like
+// every other function in this file. Exists so a higher adaptive-ranking
+// layer (src/ucb1/) can enumerate what routing already considers valid,
+// rather than re-deriving routing's own validity/health/priority-only-edge
+// rules — "UCB1 ranks only among valid candidates ... must never create a
+// route the normal routing layer would consider invalid" (Phase 5 task
+// spec, Part 4). See docs/decisions.md.
+// ============================================================
+
+// One NORMAL-eligible candidate for a destination: a real, non-stale,
+// non-priority-only-edge route, annotated with its current health.
+struct CandidateInfo {
+  NodeId nextHop;
+  uint8_t hopCount;
+  bool healthy;  // true if `neighborUnhealthy` was null or didn't flag this via-neighbor — mirrors selectNextHop()'s own convention
+};
+
+// Enumerates every currently-valid NORMAL candidate for `destination` —
+// the exact same validity rule selectNextHop() applies in its own NORMAL
+// (priority=false) branch (non-stale, excludes priority-only edges), plus
+// an optional `excludeNextHop` (NODE_ID_UNKNOWN = no exclusion) for the
+// UCB1 loop-prevention guard (Part 8) — never enumerates a candidate equal
+// to `excludeNextHop`. Returns the count written (<= maxOut, itself
+// <= NODE_ID_COUNT). Order is ascending NodeId (via 0..NODE_ID_COUNT-1),
+// matching selectNextHop()'s own tie-break convention.
+uint8_t enumerateCandidates(const RoutingState& state, NodeId destination,
+                             const bool* neighborUnhealthy, NodeId excludeNextHop,
+                             CandidateInfo* out, uint8_t maxOut);
+
 }  // namespace routing_core

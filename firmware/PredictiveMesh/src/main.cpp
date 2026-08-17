@@ -9,6 +9,7 @@
 #include "anomaly/anomaly.h"
 #include "reliability/reliability.h"
 #include "telemetry/telemetry.h"
+#include "ucb1/ucb1.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -132,7 +133,8 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 4 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 5 firmware");
+  logger::info("UCB1 adaptive routing: %s", ENABLE_UCB1 ? "ENABLED" : "disabled (default)");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
@@ -160,9 +162,12 @@ void setup() {
   anomaly::setEventCallback(onAnomalyEvent);
   reliability::init();
   reliability::setEventCallback(onReliabilityEvent);
+#if ENABLE_UCB1
+  ucb1::init();
+#endif
   telemetry::init();
 
-  logger::info("Phase 4 firmware ready - entering main loop");
+  logger::info("Phase 5 firmware ready - entering main loop");
 }
 
 void loop() {

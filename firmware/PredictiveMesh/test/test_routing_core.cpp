@@ -263,6 +263,52 @@ void test_normal_avoids_unhealthy_b() {
         "NORMAL routing: unhealthy B allows the surviving C candidate (3 hops) to become preferred");
 }
 
+// ---- 15. enumerateCandidates lists every valid NORMAL candidate, excluding priority-only edges, with health annotated (Phase 5) ----
+void test_enumerate_candidates_lists_valid_normal_candidates() {
+  RoutingState a;
+  init(a, NODE_A);
+
+  RouteAdEntry fromB[] = { { NODE_B, 0 }, { NODE_S, 1 } };
+  applyRouteAdvertisement(a, NODE_B, fromB, 2, 1000);
+  RouteAdEntry fromC[] = { { NODE_C, 0 }, { NODE_S, 2 } };
+  applyRouteAdvertisement(a, NODE_C, fromC, 2, 1000);
+  RouteAdEntry fromS[] = { { NODE_S, 0 } };
+  applyRouteAdvertisement(a, NODE_S, fromS, 1, 1000);  // direct A-S edge — priority-only, must NOT be enumerated
+
+  bool unhealthy[NODE_ID_COUNT] = { false, false, false, false, false };
+  unhealthy[NODE_C] = true;
+
+  CandidateInfo candidates[NODE_ID_COUNT];
+  uint8_t n = enumerateCandidates(a, NODE_S, unhealthy, NODE_ID_UNKNOWN, candidates, NODE_ID_COUNT);
+
+  check(n == 2, "enumerateCandidates finds exactly 2 valid NORMAL candidates (via B and via C, not the priority-only S edge)");
+  bool sawB = false, sawC = false;
+  for (uint8_t i = 0; i < n; i++) {
+    if (candidates[i].nextHop == NODE_B) { sawB = true; check(candidates[i].hopCount == 2 && candidates[i].healthy, "via-B candidate reports 2 hops and healthy=true"); }
+    if (candidates[i].nextHop == NODE_C) { sawC = true; check(candidates[i].hopCount == 3 && !candidates[i].healthy, "via-C candidate reports 3 hops and healthy=false (marked unhealthy)"); }
+    check(candidates[i].nextHop != NODE_S, "the priority-only A-S edge never appears in NORMAL candidate enumeration");
+  }
+  check(sawB && sawC, "both real candidates were found");
+}
+
+// ---- 16. enumerateCandidates respects excludeNextHop — the Phase 5 loop-prevention guard (Part 8) ----
+void test_enumerate_candidates_excludes_given_next_hop() {
+  RoutingState a;
+  init(a, NODE_A);
+
+  RouteAdEntry fromB[] = { { NODE_B, 0 }, { NODE_S, 1 } };
+  applyRouteAdvertisement(a, NODE_B, fromB, 2, 1000);
+  RouteAdEntry fromC[] = { { NODE_C, 0 }, { NODE_S, 2 } };
+  applyRouteAdvertisement(a, NODE_C, fromC, 2, 1000);
+
+  CandidateInfo candidates[NODE_ID_COUNT];
+  uint8_t n = enumerateCandidates(a, NODE_S, nullptr, /*excludeNextHop=*/NODE_B, candidates, NODE_ID_COUNT);
+
+  check(n == 1 && candidates[0].nextHop == NODE_C,
+        "excludeNextHop=B removes B from the candidate list entirely, leaving only C — "
+        "this is the guard against bouncing a packet back to whoever just sent it (Part 8)");
+}
+
 }  // namespace
 
 int main() {
@@ -278,6 +324,8 @@ int main() {
   test_route_associated_with_neighbor();
   test_priority_ignores_unhealthy_link();
   test_normal_avoids_unhealthy_b();
+  test_enumerate_candidates_lists_valid_normal_candidates();
+  test_enumerate_candidates_excludes_given_next_hop();
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);
   return g_failures == 0 ? 0 : 1;

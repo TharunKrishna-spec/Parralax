@@ -137,9 +137,27 @@ for why a broadcast peer is registered in the meantime.
 See [decisions.md](decisions.md) for the full reasoning behind each value
 and the retry/timeout/duplicate-filter/statistics semantics they drive.
 
+## UCB1 adaptive routing (Phase 5 — stretch, optional)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `ENABLE_UCB1` | `src/config.h` | `0` (disabled) — required default | Compile-time feature flag. implementation-guide.html §06 frames this stretch phase as needing to be "gate[d] behind a compile flag so it can be disabled instantly if unstable." With it at 0, every UCB1 call site is compiled out entirely — Phase 1/2/4 routing/reliability behavior is byte-for-byte unchanged. Both `0` and `1` were independently validated via a real ESP32 compile (see [testing.md](testing.md)); the repository is left at `0`. |
+| `UCB1_EXPLORATION_C` | `src/config.h` | `1.41421356` (`sqrt(2)`) | The `C` in `meanReward + C * sqrt(ln(N)/n)`. The guide gives no formula or coefficient for this stretch feature — `sqrt(2)` is the standard textbook UCB1 value (Auer, Cesa-Bianchi & Fischer, 2002), matching this project's own cited reference [10]. |
+
+**Bandit state shape:** `ucb1_core::Ucb1State.arms[NODE_ID_COUNT][NODE_ID_COUNT]`
+— one `ArmStats{everObserved, attempts, successes, failures}` per
+`(destination, next-hop)` pair, fixed-size, no dynamic allocation. No time
+field, no decay — see [decisions.md](decisions.md#no-decay--fixed-unbounded-in-time-but-bounded-in-size-counters-are-sufficient).
+
+See [decisions.md](decisions.md) for the full reasoning behind the reward
+definition (one trial per resolved hop-transmission series, never per
+retry), the health-tiering/priority-bypass/loop-prevention ordering, and
+why the compile flag's default must stay `0`.
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-Nothing remains in this category as of Phase 4 — the predictor's timing
-parameters were wired in Phase 2, the anomaly engine's in Phase 3, and the
-reliability layer's in Phase 4 (see the tables above). This section is
-kept as a placeholder heading for whatever a future phase introduces next.
+Nothing remains in this category as of Phase 5 — the predictor's timing
+parameters were wired in Phase 2, the anomaly engine's in Phase 3, the
+reliability layer's in Phase 4, and UCB1's in Phase 5 (see the tables
+above). This section is kept as a placeholder heading for whatever a
+future phase introduces next.

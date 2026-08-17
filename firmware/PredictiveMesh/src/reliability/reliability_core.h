@@ -148,6 +148,7 @@ struct AckResult {
   bool matched;
   NodeId nextHop;
   uint32_t latencyMs;
+  uint8_t slot;  // which pending[] slot this concerns — meaningful only when matched; lets the adapter recover its own parallel packet-byte storage (e.g. the original packet's destination, for Phase 5's UCB1 reward) without re-deriving it (Part 2 of Phase 5's task spec)
 };
 AckResult onAckReceived(ReliabilityState& state, NodeId source, uint16_t sequence, uint32_t now);
 

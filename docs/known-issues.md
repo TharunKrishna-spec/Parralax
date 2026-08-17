@@ -218,6 +218,44 @@ All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
 this file (except the last item, which additionally needs a real design
 decision this phase deliberately did not make — see decisions.md).
 
+## Phase 5 UCB1 adaptive routing — not yet run on hardware, and inherits Phase 4's "no live traffic" gap directly
+
+`src/ucb1/` (bandit statistics, UCB1 selection formula, health-tiering,
+loop-guard exclusion) is verified two ways: a host-compiled,
+actually-executed unit test suite
+(`firmware/PredictiveMesh/test/test_ucb1_core.cpp` — 26/26 checks, see
+`docs/testing.md`) and a real `arduino-cli` compile of the whole sketch in
+**both** `ENABLE_UCB1=0` and `ENABLE_UCB1=1` configurations. Neither is a
+substitute for the real thing — and this phase inherits Phase 4's gap
+directly and unavoidably: **UCB1's reward signal comes entirely from
+`reliability::send()`'s outcomes, and nothing calls that automatically
+yet** (see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+Even with `ENABLE_UCB1=1` flashed to real boards, the bandit tables would
+stay empty — there is no real delivery history for UCB1 to learn from
+until that gap is resolved.
+
+- [ ] `ENABLE_UCB1=1` flashed to real boards, with a real application
+      traffic source (still undecided — see above) actually generating
+      delivery outcomes
+- [ ] A real preference shift is observed — e.g. after a route's real
+      delivery rate degrades (a Faraday-bag attenuation on a specific
+      neighbor, per the guide's own §06 demo), UCB1 measurably stops
+      preferring it
+- [ ] `UCB1_EXPLORATION_C` (currently `sqrt(2)`, the textbook default) is
+      confirmed to produce sensible explore/exploit behavior at this
+      topology's real traffic volume, or re-tuned if not
+- [ ] The two-node-loop guard is confirmed to never trigger falsely on
+      real, legitimately-converged distance-vector data (it's expected to
+      be a no-op in the real topology — see
+      [decisions.md](decisions.md#forwarding-loop-prevention-relies-on-routing_core-correctness--a-next-hop-not-prev-hop-guard--the-duplicate-filter--no-new-ttl-field))
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file (the first item additionally needs the same real design
+decision — a real application traffic source — Phase 4 already flagged as
+undecided; nothing UCB1-specific above can be observed until that exists
+either).
+
 ## Phase 1 routing — not yet run on hardware
 
 Everything in `src/routing/` (distance-vector table, HELLO/route-ad

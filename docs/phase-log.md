@@ -435,3 +435,108 @@ system (would be the natural point to define what real `MSG_DATA`
 application traffic flows and wire `reliability::send()`/`getStatistics()`
 into the now-real GUI telemetry contract), and OLED wiring (deferred since
 Phase 0). Do not start any of these without explicit instruction.
+
+## Phase 5 — UCB1 adaptive routing (stretch, optional, compile-time-gated, disabled by default)
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for whatever comes next.
+
+### Objective
+Implement UCB1 multi-armed-bandit next-hop ranking per
+implementation-guide.html §06's "[stretch, optional]" label and this
+phase's own detailed task spec: an additional adaptive ranking layer
+(never a replacement for distance-vector/link-health/priority routing),
+gated behind a compile-time flag defaulting to disabled, ranking only
+among candidates the existing routing layer already considers valid, fed
+by real Phase 4 reliability observations (never fabricated rewards).
+
+### What was built
+- `src/ucb1/ucb1_core.h/.cpp` (new) — the real algorithm, Arduino-free
+  (mirrors the other three `*_core` splits): a fixed-size
+  `[destination][nextHop]` bandit-statistics table, `recordOutcome()`,
+  and `selectNextHop()` implementing the standard UCB1 formula
+  (`meanReward + sqrt(2)*sqrt(ln(N)/n)`) with explicit zero-observation
+  handling, health-tiering, loop-guard exclusion, and deterministic
+  lowest-NodeId tie-breaking. Always compiled regardless of `ENABLE_UCB1`.
+- `src/ucb1/ucb1.h/.cpp` (new) — the Arduino-facing adapter, owning the one
+  `Ucb1State` instance. `ucb1.cpp`'s entire body is wrapped in
+  `#if ENABLE_UCB1`, compiling to an empty translation unit when disabled.
+- `src/routing/routing_core.h/.cpp`: one new, purely additive function
+  (`enumerateCandidates()`) reusing `selectNextHop()`'s own validity rules
+  exactly, plus an `excludeNextHop` parameter for the loop-prevention
+  guard. Zero lines of any existing function changed.
+- `src/routing/routing.cpp`: `getNextHop()`/`selectNextHop(pkt)` refactored
+  into thin wrappers around a new internal `getNextHopInternal()` — with
+  `ENABLE_UCB1=0`, this is Phase 4's exact original code path (a pure
+  extraction, not a behavior change); with `ENABLE_UCB1=1`, NORMAL-traffic
+  decisions are additionally ranked by UCB1 among routing's own
+  already-validated candidates, with an unconditional final loop-guard
+  check regardless of which path produced the answer.
+- `src/reliability/reliability.cpp`: three `#if ENABLE_UCB1`-gated calls to
+  `ucb1::onRouteOutcome()`, at exactly the points that already represent a
+  hop-transmission series's FINAL outcome (never per retry) —
+  `handleAck()`'s match, `tick()`'s `FAILED` branch, and `transmitHop()`'s
+  synchronous-rejection path.
+- `src/reliability/reliability_core.h/.cpp`: `AckResult` gained a `slot`
+  field so the adapter can recover the original packet's destination for
+  the UCB1 reward call without `reliability_core` itself needing to store
+  one.
+- `src/config.h`: `ENABLE_UCB1` (default `0`) and `UCB1_EXPLORATION_C`
+  (`sqrt(2)`, the standard textbook value — the guide specifies neither).
+- `firmware/PredictiveMesh/test/test_ucb1_core.cpp` (new) — 26/26 checks
+  across 16 test functions, covering Part 10's scenarios 2-7 and 9-19.
+  `firmware/PredictiveMesh/test/test_routing_core.cpp` gained 2 new tests
+  (unconditional, not gated behind `ENABLE_UCB1`) for `enumerateCandidates()`
+  itself.
+- Several real, documented design calls: resolving implementation-guide.html's
+  own "as an alternative to distance-vector" framing as "ranks only among
+  already-valid candidates" per this phase's own explicit, current
+  instructions (not a silent redesign); the exact packet-series-not-retry
+  reward-trial definition, reusing Phase 4's own established boundary; two
+  independent, redundant loop-prevention layers for a "must never" safety
+  property; deliberately ignoring hop count in the ranking formula so
+  learned evidence can actually override the static heuristic; no decay
+  (fixed counters, per Part 7's explicit permission). See
+  `docs/decisions.md` for all of these in full.
+
+### What was explicitly NOT built (by design)
+Any change to `routing_core::selectNextHop()`'s own logic (zero lines
+touched); a hop-count/TTL field on `MeshPacket` (Part 8 explicitly asked
+to preserve that prior decision); decay/windowing of bandit statistics
+(not required by the guide); randomized exploration (Part 9 explicitly
+forbids it — UCB1's own exploration term is the only exploration
+mechanism); any GUI changes (explicitly forbidden this phase); any change
+to `gui-main/`; any automatic caller of `reliability::send()` (still not
+built — inherited unchanged from Phase 4, so UCB1 has no live traffic to
+learn from yet either).
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_ucb1_core.cpp`: real, host-compiled
+  (g++ 15.2.0 / MinGW-W64), actually executed — 26/26 checks passed.
+- Full existing suite re-run alongside it to confirm no regressions:
+  `test_routing_core` 28/28 (18 Phase 1 + 2 Phase 2 + 2 new Phase 5),
+  `test_predictor_core` 31/31, `test_anomaly_core` 50/50,
+  `test_reliability_core` 88/88 — **223/223 total, all five host suites.**
+- **Real `arduino-cli compile` performed for BOTH configurations** (Part
+  11): `ENABLE_UCB1=0` (906,948 bytes flash / 47,664 bytes RAM) and
+  `ENABLE_UCB1=1` (909,272 bytes flash / 48,064 bytes RAM) — both clean on
+  the first attempt, 0 errors, 0 warnings (`--warnings all`). The
+  repository's committed state was restored to `ENABLE_UCB1=0` and
+  re-verified identical to the first compile's byte counts, confirming an
+  exact restore. See [testing.md](testing.md).
+- No hardware-dependent validation, and (inherited from Phase 4) no live
+  end-to-end exercise of the pipeline — no real application traffic exists
+  yet to generate the delivery outcomes UCB1 would learn from. See
+  [known-issues.md](known-issues.md).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review. `gui-main/` was not touched.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Not yet specified by the user. `docs/phase-log.md`'s Phase 4 entry's own
+candidate list still applies unchanged: the final telemetry/reporting
+system (the natural point to both define what real `MSG_DATA` application
+traffic flows — resolving the shared Phase 4/5 "no live caller" gap — and
+wire `reliability::getStatistics()`/UCB1 diagnostics into the now-real GUI
+telemetry contract), and OLED wiring (deferred since Phase 0). Do not
+start any of these without explicit instruction.

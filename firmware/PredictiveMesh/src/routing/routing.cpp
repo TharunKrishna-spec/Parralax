@@ -5,6 +5,7 @@
 #include "../core/message_types.h"
 #include "../predictor/predictor.h"
 #include "../transport/espnow_transport.h"
+#include "../ucb1/ucb1.h"
 #include <Arduino.h>
 
 namespace {
@@ -70,6 +71,79 @@ void announceChangedRoutes() {
     NodeId via = routing_core::selectNextHop(g_state, static_cast<NodeId>(d), true, &hop);
     fireEvent(routing::RouteEventType::ROUTE_CHANGED, static_cast<NodeId>(d), via, hop, false);
   }
+}
+
+#if ENABLE_UCB1
+// Phase 5 (stretch/optional): enumerates the same NORMAL-eligible
+// candidates routing_core already validated, hands them to ucb1:: for
+// ranking, and translates its choice back into (nextHop, hopCount) for
+// the caller — falling back to `fallback` (routing_core's own baseline
+// pick) whenever UCB1 has nothing eligible to say. Entirely absent from
+// the compiled firmware when ENABLE_UCB1=0. See docs/decisions.md.
+NodeId applyUcb1Ranking(NodeId destination, const bool* unhealthy, NodeId excludeNextHop,
+                         NodeId fallback, uint8_t* hop) {
+  routing_core::CandidateInfo raw[NODE_ID_COUNT];
+  uint8_t n = routing_core::enumerateCandidates(g_state, destination, unhealthy, excludeNextHop, raw, NODE_ID_COUNT);
+  if (n == 0) return fallback;
+
+  ucb1_core::Candidate candidates[NODE_ID_COUNT];
+  for (uint8_t i = 0; i < n; i++) {
+    candidates[i] = ucb1_core::Candidate{ raw[i].nextHop, raw[i].hopCount, raw[i].healthy };
+  }
+
+  NodeId chosen = ucb1::selectNextHop(destination, candidates, n, excludeNextHop);
+  if (chosen == NODE_ID_UNKNOWN) return fallback;
+
+  if (hop) {
+    for (uint8_t i = 0; i < n; i++) {
+      if (raw[i].nextHop == chosen) {
+        *hop = raw[i].hopCount;
+        break;
+      }
+    }
+  }
+  return chosen;
+}
+#endif  // ENABLE_UCB1
+
+// Shared by getNextHop() (self-originated sends, excludeNextHop always
+// NODE_ID_UNKNOWN) and selectNextHop(pkt) (forwarding — Phase 5 passes
+// pkt.prev_hop here as the loop-prevention exclusion, Part 8). With
+// ENABLE_UCB1=0 this is exactly Phase 4's original getNextHop() body,
+// `excludeNextHop` unused - see docs/decisions.md for why the exclusion is
+// deliberately NOT threaded into routing_core::selectNextHop() itself.
+NodeId getNextHopInternal(NodeId destination, bool priority, NodeId excludeNextHop) {
+  bool unhealthy[NODE_ID_COUNT];
+  for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
+    unhealthy[n] = predictor::isUnhealthy(static_cast<NodeId>(n));
+  }
+
+  uint8_t hop = 0;
+  NodeId next = routing_core::selectNextHop(g_state, destination, priority, &hop, unhealthy);
+
+#if ENABLE_UCB1
+  // Part 5: priority traffic never reaches UCB1 — existing priority
+  // selection wins unconditionally, exactly as before.
+  if (!priority) {
+    next = applyUcb1Ranking(destination, unhealthy, excludeNextHop, next, &hop);
+  }
+  // Part 8 absolute safety net: never return the excluded hop, regardless
+  // of whether UCB1 or routing_core's own baseline pick produced it.
+  if (excludeNextHop != NODE_ID_UNKNOWN && next == excludeNextHop) {
+    next = NODE_ID_UNKNOWN;
+    hop = 0;
+  }
+#else
+  (void)excludeNextHop;
+#endif
+
+  logger::info("[ROUTE] dst=%s next=%s hops=%u priority=%d",
+               nodeName(destination),
+               next == NODE_ID_UNKNOWN ? "NONE" : nodeName(next),
+               static_cast<unsigned>(hop), priority ? 1 : 0);
+
+  fireEvent(routing::RouteEventType::ROUTE_SELECTED, destination, next, hop, priority);
+  return next;
 }
 
 void processRouteUpdate(const MeshPacket& pkt, uint32_t now) {
@@ -139,27 +213,7 @@ void tick() {
 }
 
 NodeId getNextHop(NodeId destination, bool priority) {
-  // Phase 2: NORMAL selection additionally consults predictor-observed
-  // link health for each candidate's via-neighbor (see
-  // docs/decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule).
-  // PRIORITY selection ignores this array entirely inside
-  // routing_core::selectNextHop, so building it unconditionally here is
-  // harmless (and avoids a branch that would only save a few bytes).
-  bool unhealthy[NODE_ID_COUNT];
-  for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
-    unhealthy[n] = predictor::isUnhealthy(static_cast<NodeId>(n));
-  }
-
-  uint8_t hop = 0;
-  NodeId next = routing_core::selectNextHop(g_state, destination, priority, &hop, unhealthy);
-
-  logger::info("[ROUTE] dst=%s next=%s hops=%u priority=%d",
-               nodeName(destination),
-               next == NODE_ID_UNKNOWN ? "NONE" : nodeName(next),
-               static_cast<unsigned>(hop), priority ? 1 : 0);
-
-  fireEvent(RouteEventType::ROUTE_SELECTED, destination, next, hop, priority);
-  return next;
+  return getNextHopInternal(destination, priority, NODE_ID_UNKNOWN);
 }
 
 NodeId selectNextHop(const MeshPacket& pkt) {
@@ -167,7 +221,15 @@ NodeId selectNextHop(const MeshPacket& pkt) {
     logger::warn("routing::selectNextHop: invalid destination %u", static_cast<unsigned>(pkt.destination));
     return NODE_ID_UNKNOWN;
   }
-  return getNextHop(static_cast<NodeId>(pkt.destination), pkt.priority != 0);
+#if ENABLE_UCB1
+  // Part 8: forwarding decisions pass the packet's own prev_hop as the
+  // loop-prevention exclusion — see getNextHopInternal(). Self-originated
+  // sends (plain getNextHop() above) have no prevHop to exclude.
+  return getNextHopInternal(static_cast<NodeId>(pkt.destination), pkt.priority != 0,
+                             static_cast<NodeId>(pkt.prev_hop));
+#else
+  return getNextHopInternal(static_cast<NodeId>(pkt.destination), pkt.priority != 0, NODE_ID_UNKNOWN);
+#endif
 }
 
 void setEventCallback(RouteEventCallback cb) {
