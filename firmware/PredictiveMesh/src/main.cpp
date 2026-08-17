@@ -54,6 +54,7 @@ void onRouteEvent(const routing::RouteEvent& evt) {
                 nodeName(evt.destination),
                 evt.next_hop == NODE_ID_UNKNOWN ? "NONE" : nodeName(evt.next_hop),
                 static_cast<unsigned>(evt.hop_count), evt.priority ? 1 : 0);
+  telemetry::onRouteEvent(evt);
 }
 
 // Phase 2's link-health event stream - logged for now, same pattern as
@@ -66,6 +67,7 @@ void onLinkEvent(const predictor::LinkEvent& evt) {
       : evt.type == predictor::LinkEventType::LINK_UNHEALTHY   ? "UNHEALTHY"
                                                                  : "RECOVERED";
   logger::debug("[PREDICTOR-EVENT] %s neighbor=%s score=%.2f", typeStr, nodeName(evt.neighbor), evt.score);
+  telemetry::onLinkEvent(evt);
 }
 
 // Phase 3's sensor-health event stream (state-machine transitions only,
@@ -86,6 +88,7 @@ void onAnomalyEvent(const anomaly::AnomalyEvent& evt) {
                                                                   : "SENSOR_RECOVERED";
   logger::debug("[ANOMALY-EVENT] %s sensor=%s raw=%.0f modified_z=%.2f",
                 typeStr, sensorStr, evt.telemetry.raw_value, evt.telemetry.modified_z);
+  telemetry::onAnomalyEvent(evt);
 }
 
 // Phase 4's reliability event stream (hop-by-hop TX/ACK/retry/deliver/
@@ -105,6 +108,7 @@ void onReliabilityEvent(const reliability::ReliabilityEvent& evt) {
                                                                            : "PACKET_RECEIVED";
   logger::debug("[RELIABILITY-EVENT] %s source=%s seq=%u neighbor=%s attempt=%u", typeStr, nodeName(evt.source),
                 static_cast<unsigned>(evt.sequence), nodeName(evt.neighbor), static_cast<unsigned>(evt.attemptCount));
+  telemetry::onReliabilityEvent(evt);
 }
 
 // Registers ESP-NOW peers for this node's direct topology neighbors (see
@@ -133,13 +137,22 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 5 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 6 firmware");
   logger::info("UCB1 adaptive routing: %s", ENABLE_UCB1 ? "ENABLED" : "disabled (default)");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
+
+  // Telemetry initializes before transport so a bootId/HELLO exist before
+  // anything that could fail (Part J) - the real MAC genuinely isn't known
+  // yet at this point (WiFi.macAddress() needs transport::begin() to have
+  // at least set WiFi mode first, matching the existing code below), so
+  // HELLO's optional `mac` field is honestly omitted here rather than
+  // delayed. See docs/decisions.md.
+  telemetry::init(nullptr);
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
   if (status != transport::Status::OK) {
     logger::error("Transport init failed (code=%d) - halting", static_cast<int>(status));
+    telemetry::reportError("TRANSPORT_INIT_FAILED", "ESP-NOW/WiFi transport initialization failed", false);
     while (true) {
       delay(1000);  // Phase 0: no recovery strategy yet, fail loud and stop
     }
@@ -165,9 +178,8 @@ void setup() {
 #if ENABLE_UCB1
   ucb1::init();
 #endif
-  telemetry::init();
 
-  logger::info("Phase 5 firmware ready - entering main loop");
+  logger::info("Phase 6 firmware ready - entering main loop");
 }
 
 void loop() {
@@ -182,6 +194,7 @@ void loop() {
   predictor::tick();
   anomaly::tick();
   reliability::tick();
+  telemetry::tick();
 
   if (now - g_lastSensorSample >= SENSOR_SAMPLE_INTERVAL_MS) {
     g_lastSensorSample = now;

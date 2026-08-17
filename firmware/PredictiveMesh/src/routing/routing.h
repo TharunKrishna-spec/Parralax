@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/node_id.h"
 #include "../core/packet.h"
+#include "routing_core.h"
 
 // ============================================================
 // Routing layer (implementation-guide.html §5.3, §01, §06 Hours 2-6).
@@ -60,6 +61,15 @@ NodeId getNextHop(NodeId destination, bool priority);
 
 // Convenience wrapper reading destination/priority out of `pkt`.
 NodeId selectNextHop(const MeshPacket& pkt);
+
+// Read-only: every currently-valid NORMAL candidate for `destination`,
+// health-annotated exactly the way getNextHop()'s own NORMAL selection sees
+// them (same health mask built from predictor::isUnhealthy(), same
+// routing_core::enumerateCandidates() validity/priority-only-edge rule).
+// A thin adapter wrapper for a telemetry/diagnostic consumer that needs the
+// full candidate set, not just the one winning pick — never influences
+// routing itself. Returns the count written (<= maxOut).
+uint8_t getCandidates(NodeId destination, routing_core::CandidateInfo* out, uint8_t maxOut);
 
 // Registers a callback for ROUTE_SELECTED/ROUTE_CHANGED/ROUTE_INVALIDATED
 // events. Later phases (predictor-triggered rerouting, telemetry/dashboard)

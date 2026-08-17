@@ -20,24 +20,29 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 5 complete** (2026-08-17) — UCB1 adaptive next-hop ranking, a
-**stretch, optional feature disabled by default** (`ENABLE_UCB1=0` in
-`src/config.h`), on top of the Phase 0-4 firmware foundation. See
-[`docs/phase-log.md`](docs/phase-log.md) for the full record.
+**Phase 6 complete** (2026-08-17) — pre-flash hardware readiness audit +
+real firmware<->GUI JSON telemetry (`src/telemetry/`), on top of the Phase
+0-5 firmware foundation. See [`docs/phase-log.md`](docs/phase-log.md) for
+the full record. **Physical hardware now exists (5 boards) but nothing has
+been flashed yet** — see [`docs/hardware-readiness.md`](docs/hardware-readiness.md).
 
-A **GUI implementation now exists in this repository**, under
+A **GUI implementation exists in this repository**, under
 [`gui-main/`](gui-main/) — a teammate's, not this session's. Its own
 frozen telemetry contract lives at
 [`gui-main/gui-main/docs/gui-telemetry-contract.md`](gui-main/gui-main/docs/gui-telemetry-contract.md).
 **Do not edit anything under `gui-main/`** (the HTML console, the two
 Python bridge/mock scripts, or the contract doc) — see "Workflow rules"
-below. A full GUI-vs-firmware compatibility audit was performed before
-Phase 4 (delivered directly to the user, summarized in
-[`docs/known-issues.md`](docs/known-issues.md)): firmware implements none
-of the GUI's wire format yet (no JSON serialization exists anywhere in
-`src/`), though most of the underlying data the contract needs is now
-real internally (especially sensor telemetry and, as of Phase 4,
-reliability statistics).
+below. Firmware now implements the contract for real (Phase 6) — all 10
+message types, validated by a 94-check host test suite and by running real
+firmware-generated JSON through the GUI's own unmodified parsing code (not
+just static review). See
+[`docs/gui-compatibility-matrix.md`](docs/gui-compatibility-matrix.md) for
+the full field-by-field audit — one real, demonstrated GUI-compatibility
+limitation was found and documented rather than worked around (the
+topology diagram's route animation doesn't recognize a real 2-hop
+`ROUTE_UPDATE`'s honestly-short `hops` array — distance-vector routing
+can't know the full path; see
+[`docs/decisions.md`](docs/decisions.md#guis-topology-animation-route-key-matching-doesnt-recognize-a-real-2-hop-route_update--flagged-not-worked-around-phase-6)).
 
 What exists and works: Arduino sketch structure (`firmware/PredictiveMesh/`),
 centralized node identity (`THIS_NODE_ID` in `src/config.h`), the
@@ -75,49 +80,61 @@ the **whole Phase 0+1+2+3+4+5 sketch has been compiled for real in BOTH
 `esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings, both
 times. The repository's committed default is `ENABLE_UCB1=0`.
 
-What's stubbed (interfaces only, no algorithms): `telemetry/`. Also not
-yet built: any automatic caller of `reliability::send()` (the mechanism is
-real and tested, but no real application data source was invented — see
-`docs/decisions.md`) — this also means UCB1's bandit tables have nothing
-to learn from yet even when enabled, since its reward signal comes
-entirely from `reliability::send()`'s outcomes; OLED wiring for the
-anomaly flags (Node C — deferred, same reasoning as Phase 0's original
-OLED deferral); and JSON serialization of any telemetry (the GUI's
-contract, or otherwise, including UCB1's own diagnostic state). See
-`docs/decisions.md`.
+Nothing left in `src/` is a stub interface — telemetry is real as of this
+phase. What's still not built: any automatic caller of
+`reliability::send()` (the mechanism is real and tested, but no real
+application data source was invented — see `docs/decisions.md`) — this
+also means UCB1's bandit tables have nothing to learn from yet even when
+enabled, and `STATISTICS`'s telemetry counters stay at their honest
+neutral defaults, since the reward/counter signal comes entirely from
+`reliability::send()`'s outcomes; OLED wiring for the anomaly flags (Node
+C — deferred, same reasoning as Phase 0's original OLED deferral).
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
-`known-issues.md`. Read `architecture.md` first — it also teaches the
-Arduino-build-system mechanics (`src/` subfolder compilation) this layout
-depends on.
+`known-issues.md`, `hardware-readiness.md`, `gui-compatibility-matrix.md`,
+`system-map.md` (full interface-by-interface data-flow map),
+`hardware-bringup.md` (step-by-step flash/test/troubleshooting procedure).
+Read `architecture.md` first — it also teaches the Arduino-build-system
+mechanics (`src/` subfolder compilation) this layout depends on. The
+hardware team's own bench-test sketches live in `hardware code/` (not
+`firmware/`) — treat as evidence, not something this session edits.
 
-**Still outstanding regardless of phase:** the compile check above
-validates that the firmware *builds*; nothing has run on real silicon yet
-— no boards exist. See `docs/known-issues.md`.
+**Still outstanding regardless of phase:** the compile checks above
+validate that the firmware *builds* and that its telemetry JSON is
+schema-correct; nothing has run on real silicon yet — 5 boards physically
+exist but none are flashed. See `docs/known-issues.md` and
+`docs/hardware-readiness.md`.
 
 ## Next movement
 
-**Waiting on explicit go-ahead for whatever comes next** — do not start
-anything unprompted. Phase 0-4 covers implementation-guide.html §06's
-"required, not stretch" roadmap through Hours 17-23; Phase 5 is that
-roadmap's only named stretch feature (Hours 23-28), now implemented and
-disabled by default. Candidates for what comes next (none started, none
-scoped): the final telemetry/reporting system (the natural point to
-decide what real `MSG_DATA` application traffic should flow — resolving
-the shared Phase 4/5 "no live caller" gap — and wire
-`reliability::getStatistics()`/UCB1 diagnostics into the now-real GUI
-telemetry contract), and OLED wiring (deferred since Phase 0).
+**Waiting on explicit go-ahead for whatever comes next, including physical
+flashing** — do not start anything unprompted. Phase 0-4 covers
+implementation-guide.html §06's "required, not stretch" roadmap through
+Hours 17-23; Phase 5 is that roadmap's only named stretch feature (Hours
+23-28); Phase 6 is the software-only prerequisite for the guide's next
+roadmap block (Hours 28-32, "Live demo staging & stress testing," which
+also requires physical hardware rehearsal this phase deliberately did not
+attempt). Candidates for what comes next (none started, none scoped):
+physical flashing (blocked on the teammate's real MAC mapping and the
+board-label/node-ID question — see `docs/hardware-readiness.md`), deciding
+what real `MSG_DATA` application traffic should flow (resolving the shared
+Phase 4/5/6 "no live caller/no live data" gap), and OLED wiring (deferred
+since Phase 0).
 
 Things worth rereading before starting whatever's next:
+- [`docs/hardware-readiness.md`](docs/hardware-readiness.md) — the
+  physical board inventory (A/B/D/S/E) doesn't match the required logical
+  node set (A/B/C/D/S); confirm with the hardware teammate which physical
+  board plays the `NODE_C` role before filling in any MAC address or
+  flashing anything.
 - [`docs/decisions.md`](docs/decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented) —
   the reliability mechanism (ACK/retry/duplicate-filter/forwarding/PDR
   wiring) is real and tested, but nothing calls `reliability::send()`
   automatically yet; deciding what real application data a node should
   send, to whom, and how often is a real, undecided design question — not
-  something to invent unprompted. UCB1 (Phase 5) inherits this exact same
-  gap — its bandit tables stay empty until this is resolved, even with
-  `ENABLE_UCB1=1`.
+  something to invent unprompted. UCB1 (Phase 5) and telemetry's
+  `STATISTICS` message (Phase 6) both inherit this exact same gap.
 - **`ENABLE_UCB1` must stay `0` (disabled) unless explicitly asked
   otherwise** — it's a stretch feature the guide itself only wants enabled
   "if ahead of schedule," and every UCB1-touching code path was built to
@@ -130,6 +147,12 @@ Things worth rereading before starting whatever's next:
   NORMAL-avoids-the-weak-direct-link behavior. Revisit only once real
   hardware/attenuation data exists to check that condition for real — not
   before.
+- [`docs/gui-compatibility-matrix.md`](docs/gui-compatibility-matrix.md) —
+  the `ROUTE_UPDATE.hops` 2-hop limitation and its real, demonstrated
+  effect on the GUI's topology-diagram animation. Not fixed this phase per
+  explicit instruction not to modify the GUI; revisit only as a real,
+  explicitly-requested design decision (link-state extension or a GUI-side
+  change agreed with its owner), not a quick patch on either side.
 - **GUI ownership is now a durable constraint, not just a Phase-4
   instruction** — see "Workflow rules" below.
 

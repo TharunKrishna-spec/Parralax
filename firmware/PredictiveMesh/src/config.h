@@ -304,6 +304,42 @@
 #define UCB1_EXPLORATION_C 1.41421356f
 
 // ============================================================
+// TELEMETRY (Phase 6 — firmware<->GUI wire serialization)
+// ============================================================
+// Firmware version string reported in HELLO/NODE_STATUS. No release/version
+// process existed anywhere in this project before this phase (see
+// docs/known-issues.md's pre-Phase-6 "fields with no firmware source"
+// note) - introduced here specifically because the frozen GUI contract
+// requires it as a non-empty string. Bump by convention only; not tied to
+// git tags or any external process.
+#define FIRMWARE_VERSION "1.0.0"
+
+// Telemetry envelope emission cadence, one constant per message type,
+// matching gui-main/gui-main/docs/gui-telemetry-contract.md's own "Exact
+// frequency" column exactly (not invented - the frozen contract already
+// specifies these numbers, so they're reproduced here, not re-derived).
+// HELLO fires once at boot (+ once after reconnect - N/A over a plain
+// Serial UART with no reconnect handshake, so just once at boot here);
+// EVENT/ERROR are purely event-driven (Part 10/Part N), no interval.
+#define TELEMETRY_HEARTBEAT_INTERVAL_MS 1000
+#define TELEMETRY_NODE_STATUS_INTERVAL_MS 1000
+#define TELEMETRY_LINK_INTERVAL_MS 250
+#define TELEMETRY_PREDICTION_INTERVAL_MS 250
+#define TELEMETRY_SENSOR_INTERVAL_MS 1000
+#define TELEMETRY_STATISTICS_INTERVAL_MS 1000
+
+// HELLO's config.offlineTimeoutMs - the GUI's own client-side staleness
+// clock (mesh-command-console.html's refreshFirmwareStaleness()), driven
+// entirely by this declared value, independent of any firmware-side
+// timeout. 3x the heartbeat interval, matching this project's established
+// "tolerate a couple of missed beacons" convention (see
+// ROUTING_ENTRY_TIMEOUT_MS/PREDICTOR_STALENESS_TIMEOUT_MS) - a new,
+// telemetry-specific constant rather than reusing ROUTING_ENTRY_TIMEOUT_MS,
+// since it answers a different question (when should the GUI distrust this
+// node's telemetry) even though the two happen to share a derivation.
+#define TELEMETRY_OFFLINE_TIMEOUT_MS (3 * TELEMETRY_HEARTBEAT_INTERVAL_MS)
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

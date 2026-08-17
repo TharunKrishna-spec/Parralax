@@ -82,6 +82,10 @@ bool isUnhealthy(NodeId neighbor) {
   return predictor_core::isUnhealthy(g_state, neighbor);
 }
 
+const predictor_core::NeighborLinkState& linkState(NodeId neighbor) {
+  return predictor_core::linkState(g_state, neighbor);
+}
+
 void setEventCallback(LinkEventCallback cb) {
   g_eventCallback = cb;
 }

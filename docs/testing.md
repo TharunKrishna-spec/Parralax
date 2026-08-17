@@ -4,6 +4,127 @@ No physical hardware exists yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 6 — firmware<->GUI JSON telemetry, actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs) + real GUI-parser run
+
+### 1. Host tests (`telemetry_core`'s JSON construction + Part K enum classification)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/telemetry/telemetry_core.cpp test_telemetry_core.cpp -o test_telemetry_core
+(clean compile, zero warnings)
+$ ./test_telemetry_core
+... (94 checks, see below)
+94/94 checks passed
+EXIT_CODE=0
+```
+
+16 test functions covering every one of the 10 message builders (envelope
+correctness, optional-field omission, truncation-refused-not-partial) plus
+the enum-classification helpers (`classifyLink`, `hysteresisStateStr`,
+`sensorHealthStr`, `routeReasonStr`), verified two ways: substring checks
+against every required field/value, and a brace/bracket-balance check on
+every generated line as a structural well-formedness proxy (this project
+deliberately carries no JSON parsing library — see decisions.md).
+
+Re-ran the full existing suite alongside this one to confirm nothing
+regressed: `test_routing_core` 28/28, `test_predictor_core` 31/31,
+`test_anomaly_core` 50/50, `test_reliability_core` 88/88, `test_ucb1_core`
+26/26, `test_telemetry_core` 94/94 — **317/317 total, all six host suites,
+actually run.**
+
+**What this is not:** no real Serial output, no real Arduino runtime —
+every input is a hand-constructed plain-data struct, every JSON line
+checked by hand-written substring/balance assertions against the frozen
+contract's exact field names. `telemetry.cpp` (the Arduino-facing adapter —
+real state reads from routing/predictor/anomaly/reliability, real
+`Serial.println()`, real event-callback wiring) is untested by this
+harness, same caveat as every prior phase's adapter half — reviewed by
+hand, validated by the real ESP32 compile below.
+
+### 2. Real, firmware-generated telemetry run through the GUI's own unmodified parser (Part O/P)
+
+Built a small throwaway host program (kept outside the firmware tree,
+`E:\TEMP\...\scratchpad\gui_validation\`, never committed) that links the
+real, unmodified `telemetry_core.cpp` and calls its real builder functions
+with realistic sample values, producing one boot-cycle's worth of genuine
+firmware-generated JSON lines (HELLO, HEARTBEAT, NODE_STATUS, LINK_UPDATE,
+ROUTE_UPDATE, PREDICTION, SENSOR_STATUS, EVENT, STATISTICS, ERROR).
+
+Those real lines were then fed into a Node.js script containing a
+**verbatim, character-for-character copy** of `mesh-command-console.html`'s
+real `applyTelemetry()`/`trackFirmwareMeta()`/`renderFirmware()`/`setRoute()`/
+`routeKey()`/`fmt()`/`fmtPct()`/`formatUptime()`/`log()`/`esc()` functions
+(only browser-only globals — `document.getElementById`, `performance.now()`
+— were stubbed; every line of application logic is unmodified).
+`gui-main/` itself was never opened for writing, only read from to copy the
+logic being tested — confirmed via `git diff --stat gui-main/` returning
+empty both before and after.
+
+```
+$ node gui_parser_check.mjs
+ok:   HELLO accepted with no parse warning
+ok:   HEARTBEAT accepted with no parse warning
+ok:   NODE_STATUS accepted with no parse warning
+ok:   LINK_UPDATE accepted with no parse warning
+FAIL: ROUTE_UPDATE produced a PARSE WARNING: unrecognized firmware route: "AB"
+ok:   PREDICTION accepted with no parse warning
+ok:   SENSOR_STATUS accepted with no parse warning
+ok:   EVENT accepted with no parse warning
+ok:   STATISTICS accepted with no parse warning
+ok:   ERROR accepted with no parse warning
+ok:   a skipped seq is detected and logged as SEQUENCE GAP
+ok:   a changed bootId is detected and logged as BOOT (reboot)
+```
+
+**9 of 10 message types accepted cleanly with no parse warning, resulting
+GUI state populated correctly for all of them** (node metadata, link
+health, prediction, sensor status, statistics all verified present in
+`state.firmware.*` after the run). **1 real, concrete, demonstrated
+mismatch found and NOT worked around** — see
+[decisions.md](decisions.md#guis-topology-animation-route-key-matching-doesnt-recognize-a-real-2-hop-route_update--flagged-not-worked-around-phase-6)
+and
+[gui-compatibility-matrix.md](gui-compatibility-matrix.md#0x05-route_update):
+the GUI's topology-diagram-animation `routeKey()` matcher only recognizes
+this exact demo topology's three known full-path strings
+(`"ABS"`/`"ACDS"`/`"AS"`), and firmware's honest 2-element `hops` array
+(distance-vector routing cannot know the full path — see decisions.md)
+produces `"AB"` for a 2-hop route, which isn't one of them. Per Part O's
+explicit instruction, this is reported here rather than silently patched
+on either side. Sequence-gap detection and reboot/bootId-change detection
+were also verified working against the GUI's real code, using a real
+skipped-`seq` and a real changed-`bootId` input.
+
+### 3. Real ESP32 compilation — BOTH `ENABLE_UCB1` configurations (matching Phase 5's own precedent)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=0 (default)
+Sketch uses 914988 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48536 bytes (14%) of dynamic memory, leaving 279144 bytes for local variables. Maximum is 327680 bytes.
+```
+
+```
+# config.h temporarily edited to ENABLE_UCB1=1
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=1
+Sketch uses 917132 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48936 bytes (14%) of dynamic memory, leaving 278744 bytes for local variables. Maximum is 327680 bytes.
+# config.h restored to ENABLE_UCB1=0 (required default) and re-verified — identical
+# byte counts to the first compile above (914988/48536), confirming an exact restore.
+```
+
+**Both configurations compiled clean on the first attempt — 0 errors, 0
+warnings, `esp32:esp32` core 3.3.11.** Flash grew by ~8KB and RAM by ~872
+bytes over Phase 5's own numbers, entirely attributable to the new
+telemetry module (JSON construction + the periodic emission logic in
+`telemetry.cpp`) — a small, expected footprint for ten new message
+builders plus their call sites.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (all 6 suites) | **verified** — 317/317, see above |
+| REAL FIRMWARE JSON THROUGH THE GUI'S OWN CODE | **verified** — 9/10 message types clean, 1 real documented limitation found (not a firmware bug — see above) |
+| ESP32 COMPILATION, `ENABLE_UCB1=0` (default) | **verified** — clean, 0 warnings, 0 errors |
+| ESP32 COMPILATION, `ENABLE_UCB1=1` | **verified** — clean, 0 warnings, 0 errors |
+| PHYSICAL HARDWARE | **not yet verified** — no boards flashed yet; see "Hardware-dependent tests" below |
+
 ## Phase 5 — UCB1 adaptive routing (stretch, optional), actually compiled and run (host g++) + real ESP32 compile, BOTH configurations
 
 ### 1. Host tests (bandit statistics + UCB1 selection formula)
@@ -589,25 +710,39 @@ All marked **NOT RUN — HARDWARE NOT AVAILABLE**, per
       (e.g. a historically-poor path stops being chosen)
 - [ ] `UCB1_EXPLORATION_C` (currently the textbook `sqrt(2)`) tuned against
       real hardware traffic patterns if warranted
+- [ ] Real firmware telemetry JSON, over a real Serial/USB connection, fed
+      through the GUI's real WebSerial "Connect Hardware" path (this phase
+      validated the JSON content and the GUI's parsing logic independently
+      and directly against each other — see above — but not literally over
+      a physical USB/serial link, since no hardware exists to connect)
+- [ ] `TELEMETRY_OFFLINE_TIMEOUT_MS`/the other telemetry interval constants
+      confirmed sane against real multi-node Serial output volume
+- [ ] Real MAC address populated in `HELLO.mac` (currently omitted at boot
+      — see docs/decisions.md — becomes available once `transport::begin()`
+      succeeds on real hardware)
 
 No fake or predicted results are recorded for any of the above. Do not
 mark any of these as passed until they've actually run on real hardware.
 
 ## What's still deliberately untested (later-phase stubs)
 
-Anything belonging to a stub module (`telemetry::init()`) has no
-meaningful test beyond "does it compile and return its documented safe
-default" — there's no algorithm behind it yet to verify.
-`routing::selectNextHop()`/`getNextHop()` are no longer in this category as
-of Phase 1, `predictor::linkScore()`/`isUnhealthy()` as of Phase 2,
+`routing::selectNextHop()`/`getNextHop()` are no longer in the "stub" category
+as of Phase 1, `predictor::linkScore()`/`isUnhealthy()` as of Phase 2,
 `anomaly::evaluate()`/the sensor state machine as of Phase 3,
 `reliability`'s packet identity/ACK/retry/duplicate-filter/forwarding as of
-Phase 4, and `ucb1_core`'s bandit statistics/selection formula as of Phase
-5 — see the five *_core test suites above. The one real gap left anywhere
-in this stack is `reliability::send()`'s live *caller* (not its
-mechanism) — see
+Phase 4, `ucb1_core`'s bandit statistics/selection formula as of Phase 5,
+and `telemetry`'s JSON serialization as of Phase 6 — see the six *_core
+test suites above. No stub modules remain in `src/` (OLED wiring itself is
+still not implemented, but that's a deferred hardware-integration item, not
+a stub interface — see docs/known-issues.md).
+
+The one real gap left anywhere in this stack is `reliability::send()`'s
+live *caller* (not its mechanism) — see
 [decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented),
 the same category of gap Phase 2 documented and accepted for PDR itself.
 Phase 5 inherits this exact same gap one layer further up: even with
 `ENABLE_UCB1=1`, the bandit tables have nothing to learn from until that
-caller exists.
+caller exists. Phase 6's telemetry is fully wired and produces real,
+GUI-verified output regardless of this gap — `STATISTICS`'s counters
+simply stay at their honest neutral defaults until real `MSG_DATA` traffic
+exists (see docs/hardware-readiness.md's Part F).

@@ -232,6 +232,14 @@ NodeId selectNextHop(const MeshPacket& pkt) {
 #endif
 }
 
+uint8_t getCandidates(NodeId destination, routing_core::CandidateInfo* out, uint8_t maxOut) {
+  bool unhealthy[NODE_ID_COUNT];
+  for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
+    unhealthy[n] = predictor::isUnhealthy(static_cast<NodeId>(n));
+  }
+  return routing_core::enumerateCandidates(g_state, destination, unhealthy, NODE_ID_UNKNOWN, out, maxOut);
+}
+
 void setEventCallback(RouteEventCallback cb) {
   g_eventCallback = cb;
 }

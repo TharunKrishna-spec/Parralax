@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/node_id.h"
 #include "../core/packet.h"
+#include "predictor_core.h"
 
 // ============================================================
 // Link degradation predictor (implementation-guide.html §5.1) - Arduino-
@@ -55,6 +56,13 @@ float linkScore(NodeId neighbor);
 // docs/decisions.md for how link health integrates with Phase 1's routing
 // table without replacing it.
 bool isUnhealthy(NodeId neighbor);
+
+// Read-only access to one neighbor's full evidence state (RSSI/EWMA/slope/
+// PDR/hysteresis-debounce counters) - a thin pass-through to
+// predictor_core::linkState() for a consumer that needs more than the
+// single fused score (Phase 6 telemetry's LINK_UPDATE/PREDICTION payloads).
+// Mirrors anomaly::getTelemetry()'s existing read-only-snapshot pattern.
+const predictor_core::NeighborLinkState& linkState(NodeId neighbor);
 
 void setEventCallback(LinkEventCallback cb);
 

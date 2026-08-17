@@ -540,3 +540,119 @@ traffic flows — resolving the shared Phase 4/5 "no live caller" gap — and
 wire `reliability::getStatistics()`/UCB1 diagnostics into the now-real GUI
 telemetry contract), and OLED wiring (deferred since Phase 0). Do not
 start any of these without explicit instruction.
+
+## Phase 6 — Pre-flash hardware readiness audit + firmware<->GUI live JSON telemetry
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for whatever comes next (including physical flashing).
+
+### Objective
+Physical hardware arrived this phase (5 boards) but nothing is flashed
+yet. Perform a complete pre-flash codebase/hardware-readiness audit, and
+finish the firmware-side half of the GUI integration flagged as an open
+gap since the Phase 3/4 GUI-contract audits: implement real JSON
+serialization of the frozen `mesh-json/v1` contract
+(`gui-main/gui-main/docs/gui-telemetry-contract.md`), validate it against
+the GUI's own real parsing code, and produce a full pre-flash readiness
+report — all without touching `gui-main/`, without flashing anything, and
+without inventing MAC addresses, application traffic, or telemetry values.
+
+### What was built
+- `src/telemetry/telemetry_core.h/.cpp` (new) — the real algorithm,
+  Arduino-free (mirrors `routing_core`/`predictor_core`/`anomaly_core`/
+  `reliability_core`/`ucb1_core`'s split): a bounds-checked `snprintf`-based
+  JSON `Writer`, one `buildXxx()` function per contract message type (all
+  10), and the Part-K enum-classification/mapping functions.
+- `src/telemetry/telemetry.h/.cpp` (rewritten from the Phase 0 stub) — the
+  real Arduino-facing adapter: boot-time `bootId`/`seq` state, periodic
+  emission (`tick()`) reading real state from routing/predictor/anomaly/
+  reliability, and event-driven `EVENT`/`ERROR` emission via
+  `onRouteEvent`/`onLinkEvent`/`onAnomalyEvent`/`onReliabilityEvent`.
+- `src/config.h`: `FIRMWARE_VERSION`, six `TELEMETRY_*_INTERVAL_MS`
+  constants (matching the frozen contract's own stated frequencies
+  exactly), `TELEMETRY_OFFLINE_TIMEOUT_MS`.
+- Two small, purely-additive read-only accessors: `predictor::linkState()`
+  and `routing::getCandidates()` — neither changes any existing function's
+  behavior; both mirror `anomaly::getTelemetry()`'s existing pattern.
+- `main.cpp` updated: `telemetry::init(nullptr)` now runs before
+  `transport::begin()` (so a real `bootId` and `reportError()` channel
+  exist before anything that can fail); the transport-failure branch now
+  emits a real `ERROR` message; `telemetry::tick()` added to `loop()`;
+  all four existing event-callback bodies extended to also forward into
+  `telemetry::`; banners -> "Phase 6 firmware".
+- `firmware/PredictiveMesh/test/test_telemetry_core.cpp` (new) — 94/94
+  checks across 16 test functions: every builder's required/optional-field
+  behavior, truncation safety, and all four enum-classification helpers.
+- **Real GUI-parser validation (Part O/P):** a throwaway host program
+  (kept outside the firmware tree, never committed) linked the real
+  `telemetry_core.cpp` and generated one real boot-cycle's worth of
+  firmware JSON; a Node.js script containing a verbatim copy of
+  `mesh-command-console.html`'s real `applyTelemetry()`/`trackFirmwareMeta()`/
+  `renderFirmware()` logic (browser-only globals stubbed, `gui-main/`
+  itself never written to) ran that real JSON through the GUI's own
+  parsing code. 9 of 10 message types accepted cleanly; 1 real, concrete
+  mismatch found (the topology diagram's route-key animation doesn't
+  recognize a real 2-hop `ROUTE_UPDATE`'s honestly-short `hops` array) and
+  reported, not silently patched on either side.
+- `docs/hardware-readiness.md` (new) — the full Part B/C/D/E/F audit: a
+  30-item hardware-assumption table, node/MAC/channel configuration
+  tables, and the application-traffic gap, including a flagged, unresolved
+  board-label/node-ID naming question (physical inventory reports A/B/D/S/E;
+  firmware/guide/GUI all require A/B/C/D/S).
+- `docs/gui-compatibility-matrix.md` (new) — the full Part G field-by-field
+  audit: every contract field's real firmware source, and every place a
+  value is derived rather than directly stored, documented explicitly.
+- Several real, documented design calls: `bootId` as a random nonce, not a
+  persistent counter (no NVS wired, and adding one wasn't warranted);
+  hand-rolled JSON instead of a new ArduinoJson dependency; `ROUTE_UPDATE`'s
+  `hops`/`score`/`reason` honest-limitation decisions; event-type mapping
+  decisions for every one of the 8 event sources this phase wired; why
+  UCB1 gets no dedicated telemetry message. See `docs/decisions.md` for all
+  of these in full.
+
+### What was explicitly NOT built (by design)
+Any flashing of physical hardware (explicitly out of scope this phase — see
+`CLAUDE.md`); OLED wiring (still deferred, unrelated to this phase); any
+automatic caller of `reliability::send()` (Part F: searched the guide and
+repository, found no defined application traffic — remains a documented
+gap, not invented); a fabricated `ROUTE_UPDATE.hops` full path (would
+require either guessing or a real link-state protocol extension — neither
+built); a UCB1-specific telemetry message (the frozen contract has none,
+and Part 13 explicitly forbade inventing one); any change to `gui-main/`
+(confirmed via `git diff --stat gui-main/` returning empty, both before and
+after); any real MAC address (the peer table remains the Phase 0 sentinel,
+awaiting the teammate's real mapping).
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_telemetry_core.cpp`: real,
+  host-compiled (g++ 15.2.0 / MinGW-W64), actually executed — 94/94 checks
+  passed.
+- Full existing suite re-run alongside it to confirm no regressions:
+  `test_routing_core` 28/28, `test_predictor_core` 31/31, `test_anomaly_core`
+  50/50, `test_reliability_core` 88/88, `test_ucb1_core` 26/26 — **317/317
+  total, all six host suites, actually run.**
+- Real firmware-generated JSON run through the GUI's own real, unmodified
+  parsing logic (Node.js) — see "What was built" above and
+  [testing.md](testing.md) for the full transcript.
+- **Real `arduino-cli compile` performed for BOTH configurations**:
+  `ENABLE_UCB1=0` (914,988 bytes flash / 48,536 bytes RAM) and
+  `ENABLE_UCB1=1` (917,132 bytes flash / 48,936 bytes RAM) — both clean on
+  the first attempt, 0 errors, 0 warnings (`--warnings all`). The
+  repository's committed state was restored to `ENABLE_UCB1=0` and
+  re-verified byte-identical to the first compile, confirming an exact
+  restore. See [testing.md](testing.md).
+- No hardware-dependent validation — no boards flashed this phase (out of
+  scope by explicit instruction). See [known-issues.md](known-issues.md)
+  and [hardware-readiness.md](hardware-readiness.md).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review. `gui-main/` was not touched.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Physical flashing, now that the audit is complete — but blocked on: (1)
+the teammate's real MAC-address mapping, and (2) confirming the physical
+board-label/logical-node-ID question (`docs/hardware-readiness.md`).
+Beyond flashing: OLED wiring (deferred since Phase 0), and resolving the
+application-traffic gap (`docs/hardware-readiness.md`'s Part F) — a real
+design decision about what `MSG_DATA` should actually carry, still not
+made. Do not start any of these without explicit instruction.

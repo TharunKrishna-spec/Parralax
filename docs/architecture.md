@@ -1,10 +1,11 @@
 # Architecture
 
-Status: **Phase 5 — transport + routing + predictor + anomaly + reliability
-real; UCB1 adaptive routing implemented as an optional, compile-time-gated
-stretch layer (disabled by default); telemetry still a stub.** This
-document describes what exists
-now and the shape it's built to grow into. It does not describe algorithms
+Status: **Phase 6 — transport + routing + predictor + anomaly + reliability
++ telemetry all real; UCB1 adaptive routing implemented as an optional,
+compile-time-gated stretch layer (disabled by default). Firmware now
+serializes the frozen firmware<->GUI JSON contract for real — nothing left
+in `src/` is a stub interface.** This document describes what exists now
+and the shape it's built to grow into. It does not describe algorithms
 that aren't implemented yet — see [known-issues.md](known-issues.md) for
 those.
 
@@ -60,7 +61,7 @@ Bottom to top, matching implementation-guide.html §01:
 | Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | UCB1 adaptive ranking (stretch, optional) | **Implemented, disabled by default** (Phase 5) | `src/ucb1/` |
-| Reporting (OLED + Serial/WebSerial) | Stub interface only | `src/telemetry/` |
+| Reporting (Serial/WebSerial JSON telemetry) | **Implemented** (Phase 6) — OLED still not wired | `src/telemetry/` |
 
 Data is meant to flow bottom-up: raw radio -> statistics -> routing
 decisions -> reliability -> reporting. Phase 0 wired the bottom layer for
@@ -78,8 +79,13 @@ choosing a NORMAL next hop (see "Routing + predictor integration (Phase
 `(pkt, rssi)` (`reliability::onPacketReceived()`), and closes a different
 loop: reliability *writes into* the predictor via `predictor::onSendResult()`
 whenever a real hop-transmission's outcome (ACK'd or timed-out) becomes
-known — see "Reliability layer (Phase 4)" below. Telemetry remains a clean
-call-through stub for a later phase.
+known — see "Reliability layer (Phase 4)" below. Phase 6 adds telemetry as
+a consumer one level removed from the packet-receive path: it never
+registers its own transport/packet callback, instead reading routing's/
+predictor's/anomaly's/reliability's already-real state through their
+existing read-only accessors (plus one small new accessor each on
+`predictor`/`routing`) and their existing event-callback mechanism — see
+"Telemetry layer (Phase 6)" below.
 
 ## Firmware layout and why it's structured this way
 
@@ -113,15 +119,18 @@ firmware/PredictiveMesh/
     ├── ucb1/
     │   ├── ucb1_core.h/.cpp   <- pure bandit-statistics/UCB1-selection algorithm, no Arduino dependency, always compiled
     │   └── ucb1.h/.cpp        <- Arduino-facing adapter; .cpp body entirely `#if ENABLE_UCB1`-gated (config.h)
-    └── telemetry/     <- stub
+    └── telemetry/
+        ├── telemetry_core.h/.cpp   <- pure JSON envelope/payload construction (mesh-json/v1), no Arduino dependency
+        └── telemetry.h/.cpp        <- Arduino-facing adapter (reads routing/predictor/anomaly/reliability state, Serial.println())
 
 firmware/PredictiveMesh/test/
 ├── test_routing_core.cpp      <- host-compiled (g++) unit tests for routing_core (incl. Phase 5's enumerateCandidates)
 ├── test_predictor_core.cpp    <- host-compiled (g++) unit tests for predictor_core
 ├── test_anomaly_core.cpp      <- host-compiled (g++) unit tests for anomaly_core
 ├── test_reliability_core.cpp  <- host-compiled (g++) unit tests for reliability_core
-└── test_ucb1_core.cpp         <- host-compiled (g++) unit tests for ucb1_core
-                                   see docs/testing.md for all five
+├── test_ucb1_core.cpp         <- host-compiled (g++) unit tests for ucb1_core
+└── test_telemetry_core.cpp    <- host-compiled (g++) unit tests for telemetry_core
+                                   see docs/testing.md for all six
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -230,6 +239,14 @@ auto-detection.
    completely disjoint from the packet-receive path above — sensor
    readings never touch `MeshPacket`, and mesh traffic never touches
    sensor state.
+10. `app::loop()`'s final call each iteration is `telemetry::tick()`, which
+    rate-limits itself per `TELEMETRY_*_INTERVAL_MS` and reads real state
+    from routing/predictor/anomaly/reliability to emit periodic
+    HEARTBEAT/NODE_STATUS/LINK_UPDATE/PREDICTION/SENSOR_STATUS/STATISTICS
+    lines over Serial. Event-driven EVENT/ERROR lines are emitted
+    synchronously from `main.cpp`'s existing routing/predictor/anomaly/
+    reliability event-callback bodies, not from `tick()` — see "Telemetry
+    layer (Phase 6)" below.
 
 See [protocol.md](protocol.md) for why the wire format only grew real
 *use* of already-existing fields (Phase 4), not new bytes, and
@@ -568,6 +585,84 @@ override the static heuristic. This also means, on a fresh boot with no
 history, UCB1's zero-observation forced-exploration could pick a
 worse-hop-count candidate first before any evidence exists to prefer
 otherwise — an expected, bounded cost of exploration, not a bug.
+
+## Telemetry layer (Phase 6)
+
+`src/telemetry/` follows the same pure-core/adapter split as every other
+layer:
+
+- **`telemetry_core.h`/`.cpp`** — the real JSON construction: a small,
+  bounds-checked `snprintf`-based `Writer` and one `buildXxx()` function
+  per contract message type (`HELLO`/`HEARTBEAT`/`NODE_STATUS`/
+  `LINK_UPDATE`/`ROUTE_UPDATE`/`PREDICTION`/`SENSOR_STATUS`/`EVENT`/
+  `STATISTICS`/`ERROR`), plus the Part-K enum-classification/mapping
+  functions (`classifyLink`, `linkStateStr`/`predictionStateStr`,
+  `hysteresisStateStr`, `roleStr`, `routeReasonStr`, `sensorHealthStr`).
+  Zero Arduino dependency, zero knowledge that routing_core/predictor_core/
+  anomaly_core/reliability_core/ucb1_core exist — every function takes
+  already-extracted plain data (floats, ints, small enums, `const char*`
+  literals) and returns a complete JSON line. This is what
+  `firmware/PredictiveMesh/test/test_telemetry_core.cpp` compiles and runs
+  directly with a host compiler.
+- **`telemetry.h`/`.cpp`** — the thin Arduino-facing adapter. Owns the
+  boot-time `bootId`/per-envelope `seq` counter, reads real state via
+  `predictor::linkState()`/`routing::getCandidates()` (two small, new,
+  purely-additive read-only accessors added this phase — see below),
+  `anomaly::getTelemetry()`, and `reliability::getStatistics()` (all
+  pre-existing), calls `telemetry_core`'s builders, and `Serial.println()`s
+  the result. Event-driven messages (`EVENT`/`ERROR`) are produced from
+  `telemetry::onRouteEvent()`/`onLinkEvent()`/`onAnomalyEvent()`/
+  `onReliabilityEvent()`, called from inside `main.cpp`'s existing single
+  event-callback bodies (see decisions.md — not a second registered
+  callback, since each source module supports only one).
+
+**Layering (Part H).** Routing/predictor/anomaly/reliability/ucb1 have
+zero awareness that telemetry, JSON, or a GUI exist — confirmed by
+inspection (none of their headers/`.cpp` files include anything under
+`src/telemetry/`). Only `main.cpp` (the existing cross-module wiring layer)
+and `telemetry.cpp` itself know both sides. Two small, purely-additive
+read-only accessors were added to expose data telemetry needs that no
+existing accessor covered: `predictor::linkState(NodeId)` (the full
+`NeighborLinkState`, mirroring `anomaly::getTelemetry()`'s existing
+pattern) and `routing::getCandidates(NodeId, CandidateInfo*, uint8_t)` (a
+thin wrapper around Phase 5's already-existing
+`routing_core::enumerateCandidates()`, building the same health mask
+`getNextHop()` itself builds). Neither changes any existing function's
+behavior.
+
+**Envelope (Part I).** Exactly the frozen contract's 7 fields
+(`protocolVersion`/`type`/`nodeId`/`bootId`/`seq`/`timestampMs`/`payload`),
+no renamed fields, no invented message names. `bootId` is a fresh
+`esp_random()`-derived nonce generated once per boot (no persistent
+storage exists anywhere in this project — see decisions.md); `seq` is a
+telemetry-owned `uint32_t` counter, structurally independent of
+`MeshPacket.sequence` (reliability's own packet identity) per the
+contract's explicit warning not to conflate the two.
+
+**Rate limiting (Part N).** One `TELEMETRY_*_INTERVAL_MS` constant per
+periodic message type (`config.h`), each reproducing the frozen contract's
+own stated frequency exactly (not re-derived): HEARTBEAT/NODE_STATUS/
+SENSOR_STATUS/STATISTICS at 1000ms, LINK_UPDATE/PREDICTION at 250ms.
+EVENT/ERROR are purely event-driven, no interval. ROUTE_UPDATE fires only
+on genuine routing-table changes (`ROUTE_CHANGED`/`ROUTE_INVALIDATED`), not
+on every next-hop decision query (`ROUTE_SELECTED`, which fires far more
+often — see decisions.md).
+
+**Known, documented gaps (not fixed this phase, not silently worked
+around):** `ROUTE_UPDATE.hops` can only ever report 2 elements
+(`[thisNode, nextHop]`) since distance-vector routing never learns a
+destination's full multi-hop path — this has a real, demonstrated
+consequence for the GUI's topology-diagram animation (verified by running
+real firmware output through the GUI's own unmodified parser — see
+[testing.md](testing.md) and [decisions.md](decisions.md)); `ROUTE_UPDATE.score`
+reuses the next hop's own `link_score` (no multi-hop composite score exists
+anywhere in this codebase); `ROUTE_UPDATE.reason` is `UNKNOWN` outside the
+priority/expiry cases `routing_core` can actually distinguish; `STATISTICS.
+endToEndLatencyMs` actually reports per-hop latency; `HELLO.mac` is omitted
+at boot until `transport::begin()` succeeds. See
+[gui-compatibility-matrix.md](gui-compatibility-matrix.md) for the complete
+field-by-field audit and [decisions.md](decisions.md) for the reasoning
+behind each.
 
 ## Practical theory notes
 

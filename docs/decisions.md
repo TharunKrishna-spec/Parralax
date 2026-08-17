@@ -1855,3 +1855,551 @@ entries go at the bottom. Format:
   directly demonstrates a 3-hop candidate with strong history beating a
   2-hop candidate with poor history.
 - **Phase/date:** Phase 5, 2026-08-17.
+
+---
+
+## Board-label/node-ID mismatch flagged, not silently resolved (Phase 6)
+- **Decision:** The physical board inventory reported this phase uses
+  labels A/B/D/S/E; firmware/guide/GUI all require exactly A/B/C/D/S. Rather
+  than assume "E" means "C" and silently proceed, this is documented as an
+  open question in `docs/hardware-readiness.md` requiring team confirmation
+  before the MAC table is filled in.
+- **Reason:** `CLAUDE.md`'s standing rule: a real discrepancy against the
+  source-of-truth topology gets flagged and asked about, not guessed —
+  getting this wrong would misassign a physical board's role before flashing.
+- **Alternatives considered:** Silently assume E=C and proceed; rename the
+  logical topology to include "E".
+- **Why alternatives were rejected:** Silently assuming risks flashing the
+  wrong board with the wrong role if the assumption is wrong. Renaming the
+  topology would be an unrequested redesign of a fixed, guide-specified
+  5-node topology (A/B/C/D/S), and would break the frozen GUI contract's own
+  `nodeId` enum.
+- **Impact:** No code change. `docs/hardware-readiness.md`'s Part C table
+  marks every MAC as PENDING and flags the C/E question explicitly.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `telemetry` gets its own pure-core/adapter split — 5th instance of the pattern (Phase 6)
+- **Decision:** `src/telemetry/telemetry_core.h/.cpp` (pure JSON
+  construction, zero Arduino dependency) + `src/telemetry/telemetry.h/.cpp`
+  (the Arduino-facing adapter that reads real state from routing/predictor/
+  anomaly/reliability and calls the builders), mirroring the
+  routing_core/predictor_core/anomaly_core/reliability_core/ucb1_core split
+  exactly.
+- **Reason:** JSON string construction is real, order/format-sensitive
+  logic worth verifying on its own outside the ESP32 toolchain — the same
+  reasoning applied four times already. It also directly satisfies Part P's
+  requirement for a "hardware-free integration test" using real
+  firmware-generated telemetry structures, not a simulator.
+- **Alternatives considered:** Build JSON strings inline inside
+  `telemetry.cpp` only, with no separate testable module.
+- **Why alternatives were rejected:** Would leave the JSON construction
+  itself — the part most likely to have a real bug (a missing comma, wrong
+  field name, unbalanced brace) — completely unverified outside a real
+  ESP32 flash, breaking this project's own established testing philosophy.
+- **Impact:** `test_telemetry_core.cpp`, 94/94 checks, host-compiled and
+  actually run; see `docs/testing.md`.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## Hand-rolled snprintf-based JSON construction, no ArduinoJson dependency (Phase 6)
+- **Decision:** `telemetry_core`'s `Writer` (an internal, bounds-checked
+  `vsnprintf`-append helper) builds every JSON line by hand; no JSON
+  library was added to this project.
+- **Reason:** Mirrors this project's own already-stated philosophy for the
+  ESP-NOW wire format (`docs/protocol.md`: "a serialization library... would
+  add complexity this... project doesn't need") and its established
+  no-new-library-without-a-real-reason pattern (OLED library deliberately
+  deferred, `docs/decisions.md`). Every string field telemetry ever writes
+  is a fixed literal chosen by firmware itself — never untrusted or dynamic
+  content — so no JSON string-escaping logic is needed either, further
+  reducing what a library would actually buy here.
+- **Alternatives considered:** ArduinoJson (the de facto standard for this
+  ecosystem).
+- **Why alternatives were rejected:** A new external library dependency for
+  a genuinely simple, fixed-shape serialization job (10 known message
+  shapes, no arbitrary/nested user data) is exactly the kind of
+  "unjustified complexity" this project has consistently avoided elsewhere.
+  Truncation safety is achieved directly via `vsnprintf`'s own return-value
+  contract (see `Writer::ok`), without needing a library for it.
+- **Impact:** `telemetry_core.cpp` is ~230 lines, zero new dependencies,
+  fully host-testable.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## Envelope `seq` is a fresh per-boot counter, independent of `MeshPacket.sequence` (Phase 6)
+- **Decision:** `telemetry.cpp` owns its own `g_seq` (`uint32_t`), starting
+  at 0 each boot, incremented once per emitted envelope (across all message
+  types from that node) — structurally separate from
+  `reliability_core::ReliabilityState.nextSeqCounter` (`MeshPacket.sequence`,
+  16-bit, per-source packet identity).
+- **Reason:** The frozen contract explicitly requires this separation
+  ("GUI telemetry seq != MeshPacket.sequence") — already anticipated and
+  documented as far back as Phase 4's `core/packet.h` comments, now
+  actually implemented for the first time.
+- **Alternatives considered:** Reuse `reliability_core`'s sequence counter
+  for both purposes.
+- **Why alternatives were rejected:** Would conflate two genuinely
+  different concepts (a per-envelope GUI-message counter vs. a per-mesh-packet
+  radio-level identity) with different lifetimes, different wraparound
+  behavior, and different consumers — exactly what the contract's own
+  wording warns against.
+- **Impact:** `uint32_t` wraps after ~4.29 billion envelopes — at this
+  project's real emission rate (roughly 6-10 messages/second combined
+  across all periodic types), that's on the order of years of continuous
+  uptime, not a practical concern for this project's timescale; documented
+  here rather than silently ignored.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `bootId` is an `esp_random()` nonce, not a persistent monotonic counter (Phase 6)
+- **Decision:** `telemetry::init()` generates `bootId` as
+  `"<nodeName>-<8 hex digits from esp_random()>"`, e.g. `"A-3f9c21a4"` —
+  freshly random every boot, never read back from or written to persistent
+  storage.
+- **Reason:** The contract only requires `bootId` to be "opaque non-empty
+  string, changes on reboot" — it does not require monotonic incrementing.
+  This project has no NVS/Preferences usage anywhere (no persistent storage
+  wired at all), and adding one purely to maintain a boot counter would be
+  a new dependency/design decision out of proportion to what the contract
+  actually needs. `esp_random()` is a real, always-available ESP32 hardware
+  RNG API — not fabricated data, and for practical purposes guarantees a
+  different value on every reboot.
+- **Alternatives considered:** A persistent boot counter via NVS (matching
+  the contract's own example `"a-0007"`, which reads as a counter).
+- **Why alternatives were rejected:** Would introduce a new storage
+  dependency and a real design question (wear-leveling, first-boot
+  initialization, reset semantics) this phase's scope doesn't require —
+  the contract's actual requirement (detect reboot via a *changed* value)
+  is fully satisfied by a random nonce.
+- **Impact:** GUI's `trackFirmwareMeta()` reboot detection (`old bootId !==
+  new bootId`) works correctly with a random nonce exactly as it would with
+  a counter — verified by running the GUI's own real code against a
+  simulated bootId change (see `docs/testing.md`).
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `telemetry::init()` runs before `transport::begin()` (Phase 6)
+- **Decision:** `main.cpp`'s `setup()` now calls `telemetry::init(nullptr)`
+  (no MAC yet) before `transport::begin()`, not after.
+- **Reason:** So a real `bootId`/`seq` and a working `telemetry::reportError()`
+  channel exist before the one call in `setup()` that can fail outright
+  (`transport::begin()`) — letting that failure be reported as a real
+  contract-conformant `ERROR` message, not just a human-readable log line.
+- **Alternatives considered:** Keep `telemetry::init()` after
+  `transport::begin()` (matching the original Phase 0-5 stub-init ordering)
+  and special-case the transport-failure branch with a hand-written
+  one-off JSON line.
+- **Why alternatives were rejected:** A special-cased one-off would
+  duplicate envelope-construction logic outside `telemetry_core`'s tested
+  path, risking exactly the kind of hand-written JSON bug the pure-core
+  split exists to prevent.
+- **Impact:** HELLO's `mac` field is genuinely omitted at this first boot
+  (the real MAC isn't known until after `transport::begin()` sets WiFi
+  mode) — honest, not a compromise, since the contract already marks `mac`
+  optional-when-unavailable. No second HELLO is sent once the MAC becomes
+  known (the contract only requires HELLO "once at boot", and there's no
+  real UART "reconnect" event to trigger the "once after reconnect" case).
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## Event forwarding via extending main.cpp's existing single callbacks, not a second registration (Phase 6)
+- **Decision:** `telemetry::onRouteEvent/onLinkEvent/onAnomalyEvent/onReliabilityEvent`
+  are called from inside `main.cpp`'s existing `onRouteEvent`/`onLinkEvent`/
+  `onAnomalyEvent`/`onReliabilityEvent` functions, alongside their existing
+  `logger::debug()` calls — not registered as a second callback via each
+  module's own `setEventCallback()`.
+- **Reason:** Every one of routing/predictor/anomaly/reliability's event
+  callback mechanisms explicitly documents "at most one callback is
+  supported." `main.cpp` already holds that one slot for logging. This also
+  keeps Part H's layering requirement airtight: routing/predictor/anomaly/
+  reliability still have zero awareness that telemetry or a GUI exists —
+  only `main.cpp`, the existing wiring layer, knows both sides.
+- **Alternatives considered:** Extend each module to support multiple
+  registered callbacks (a small array/list instead of one function
+  pointer).
+- **Why alternatives were rejected:** A real architecture change to five
+  modules, unrequested and unnecessary — the existing single-callback
+  design already anticipated exactly this situation in its own doc
+  comments ("a later phase... subscribes to the same X::setEventCallback()
+  instead of adding a new hook here" — read here as "extend the one
+  existing subscriber," which is what `main.cpp`'s callback bodies now do).
+- **Impact:** Four one-line additions in `main.cpp`, zero changes to
+  routing/predictor/anomaly/reliability's own event-callback code.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `LinkClass` DEGRADING/RECOVERING states are derived from the existing hysteresis debounce counters (Phase 6)
+- **Decision:** The contract's 6-value `linkState`/`predictionState` enums
+  (which include DEGRADING and RECOVERING, states `predictor_core` doesn't
+  persist as a discrete field) are computed in `telemetry_core::classifyLink()`
+  from real, already-stored evidence: `belowCount > 0` while HEALTHY means
+  DEGRADING (evaluations are accumulating toward the bad threshold but
+  haven't crossed the debounce yet); `aboveCount > 0` while UNHEALTHY means
+  RECOVERING (the symmetric case).
+- **Reason:** `predictor_core::RecomputeResult`'s `degrading`/`becameHealthy`
+  flags are momentary (true only during the single tick the transition
+  happens), never persisted in `NeighborLinkState` — but the debounce
+  counters that *produce* those momentary flags already are, and reusing
+  them is a real derivation from real state, not an invention.
+- **Alternatives considered:** Add new discrete `DEGRADING`/`RECOVERING`
+  fields to `NeighborLinkState` itself.
+- **Why alternatives were rejected:** Would duplicate information already
+  fully recoverable from existing fields, for no gain — a purely
+  telemetry-side concern shouldn't grow `predictor_core`'s own state shape.
+- **Impact:** `test_telemetry_core.cpp`'s `test_classify_link_all_branches`
+  directly tests all 6 classification outcomes against hand-constructed
+  evidence combinations.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `ROUTE_UPDATE.hops` is honestly limited to 2 elements — distance-vector routing cannot know the full path (Phase 6)
+- **Decision:** `active.hops`/`candidates[].hops` are always exactly
+  `[thisNode, nextHop]`, even when the real `hopCount` is greater than 1.
+  No intermediate topology is fabricated.
+- **Reason:** `routing_core`'s distance-vector table only ever stores
+  `(destination, via-neighbor, hop_count)` — by design, the entire point of
+  distance-vector routing versus link-state routing is that a node never
+  learns the full path, only the next hop and total distance. This node has
+  no visibility into what next hop a remote neighbor would itself choose.
+- **Alternatives considered:** (a) Reconstruct a plausible full path using
+  the static topology adjacency (`core/node_id.h::neighborsOf()`), which is
+  already treated as ground truth elsewhere. (b) Add a link-state extension
+  so paths are actually learned.
+- **Why alternatives were rejected:** (a) would only be a *guess* consistent
+  with the static topology, not necessarily the path actually,
+  independently selected hop-by-hop by each real node's own live
+  health/priority state — presenting it as fact would be a real fabrication
+  risk. (b) is a genuine, out-of-scope protocol redesign, not something to
+  invent unprompted mid-telemetry-phase.
+- **Impact:** Real, demonstrated GUI consequence — see
+  `docs/gui-compatibility-matrix.md`'s `ROUTE_UPDATE` section and
+  `docs/known-issues.md`: the topology diagram's animated-path feature
+  doesn't recognize a 2-element `hops` array for any route beyond the
+  direct A-S edge, confirmed by running real firmware-generated
+  `ROUTE_UPDATE` output through the GUI's own unmodified `applyTelemetry()`/
+  `setRoute()` code. Not silently worked around; flagged per Part O's
+  explicit instruction.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `ROUTE_UPDATE.score` reuses the next hop's own `link_score` as a route-quality proxy (Phase 6)
+- **Decision:** Both `active.score` and each `candidates[].score` report
+  `predictor::linkScore(nextHop)` — the *first hop's* link quality, not a
+  true multi-hop composite.
+- **Reason:** `routing_core` has no aggregate multi-hop route-quality
+  concept anywhere (only per-neighbor `link_score` exists, in `predictor_core`).
+  Reusing a real, measured quantity is more honest than inventing a new
+  composite formula (e.g. min/product across hops) with no basis in any
+  existing algorithm this project has built or the guide has specified.
+- **Alternatives considered:** A hop-count-based synthetic score (e.g.
+  `1/hopCount`); leave `score` at a placeholder constant.
+- **Why alternatives were rejected:** Both would be more fabricated than
+  reusing a real, already-computed value — a synthetic hop-count-derived
+  number would misrepresent itself as a *quality* measurement when it's
+  really just re-encoding a fact (`hopCount`) the schema already reports
+  separately.
+- **Impact:** Documented explicitly in `docs/gui-compatibility-matrix.md`
+  rather than left implicit.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `ROUTE_UPDATE.reason` is `UNKNOWN` when routing_core cannot distinguish why a route changed (Phase 6)
+- **Decision:** `telemetry_core::routeReasonStr(priority, invalidated)`
+  maps: `priority==true` -> `PRIORITY_OVERRIDE`; `invalidated==true` (and
+  not priority) -> `ROUTE_EXPIRED`; otherwise -> `UNKNOWN` — never guessing
+  between the contract's other five values (`LINK_DEGRADATION`,
+  `LINK_FAILURE`, `STALE_NEIGHBOR`, `ROUTE_RECOVERY`, `MANUAL`).
+- **Reason:** `routing::RouteEventType` only carries 3 coarse values
+  (SELECTED/CHANGED/INVALIDATED) with no finer-grained cause attached.
+  Correlating a `ROUTE_CHANGED` event against `predictor`'s independent
+  `LINK_DEGRADING`/`LINK_RECOVERED` event stream to *infer* a cause was
+  considered and rejected — a `ROUTE_CHANGED` can happen for reasons
+  unrelated to any specific link event (e.g. a fresh advertisement from a
+  neighbor), and correlating two independent event streams into an implied
+  causal story would be fabricating certainty this firmware doesn't
+  actually have.
+- **Alternatives considered:** Best-effort correlation against predictor's
+  link events, described above.
+- **Why alternatives were rejected:** Real risk of reporting a wrong
+  "reason" with high confidence — worse than honestly reporting `UNKNOWN`,
+  which is itself a valid, defined contract enum value for exactly this
+  situation.
+- **Impact:** Revisit if `routing_core` is ever extended to track a real
+  change-cause per candidate (a genuine future design decision, not
+  something to invent here).
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `ROUTE_UPDATE` is emitted only on real `ROUTE_CHANGED`/`ROUTE_INVALIDATED` events, never on `ROUTE_SELECTED` (Phase 6)
+- **Decision:** `telemetry::onRouteEvent()` ignores non-priority
+  `ROUTE_SELECTED` events entirely for `ROUTE_UPDATE` purposes (priority
+  ones instead become a `PRIORITY_ROUTE` `EVENT` — see below).
+- **Reason:** `routing::RouteEventType::ROUTE_SELECTED` fires on *every*
+  next-hop decision query (`getNextHop()`/`selectNextHop()`), including
+  from `reliability::send()` and every forward — a genuine table mutation
+  is a much rarer, more meaningful event than "a decision was asked for."
+  Treating every query as a telemetry-worthy route update would violate
+  Part N's "do not spam" requirement once real traffic exists.
+- **Alternatives considered:** Emit `ROUTE_UPDATE` on every `ROUTE_SELECTED`
+  too.
+- **Why alternatives were rejected:** Would flood the Serial/GUI channel
+  once `reliability::send()` gets a live caller (still pending, Part F) —
+  the contract's own frequency for `ROUTE_UPDATE` is explicitly
+  change-driven ("on active/candidate/reason change"), not per-decision.
+- **Impact:** None currently observable (no live traffic exists to query
+  routing repeatedly yet), but structurally correct for when it does.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `EVENT` type mapping: no discrete event for `LINK_RECOVERED`/`SENSOR_RECOVERED` (Phase 6)
+- **Decision:** `predictor::LINK_RECOVERED` and `anomaly::SENSOR_RECOVERED`
+  do not produce a discrete `EVENT` message.
+- **Reason:** The frozen contract's `EVENT` enum has no "recovered"/"healthy
+  again" value for either link or sensor state (`LINK_DEGRADING`/`LINK_FAILURE`
+  and `SENSOR_ANOMALY`/`SENSOR_FAILURE` exist; their positive counterparts
+  don't). Forcing recovery into a mismatched enum value (e.g. reusing
+  `LINK_DEGRADING` with a misleading meaning) would misrepresent what
+  actually happened.
+- **Alternatives considered:** Reuse the nearest enum value with a
+  clarifying `details` field; skip the discrete event entirely (chosen).
+- **Why alternatives were rejected:** An `eventType` that says the opposite
+  of what happened, even with clarifying details, is a worse failure mode
+  than omitting the event — a log-scanning consumer would misread it at a
+  glance.
+- **Impact:** No information is actually lost — `LINK_UPDATE`/`PREDICTION`'s
+  own `state`/`predictionState` fields already transition back to
+  HEALTHY/STABLE (and `SENSOR_STATUS.healthState` back to NORMAL) on the
+  very next periodic emission, visible in the GUI's existing panels.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `EVENT` vs `STATISTICS`: ordinary packet TX/ACK/DELIVERED/RECEIVED/duplicate outcomes are not discrete events (Phase 6)
+- **Decision:** `reliability::PACKET_TX`/`PACKET_ACK`/`PACKET_DELIVERED`/
+  `PACKET_RECEIVED`/`DUPLICATE_DROPPED` do not produce `EVENT` messages;
+  only `PACKET_RETRY` and `PACKET_DROP` do (both have exact contract enum
+  matches).
+- **Reason:** The contract's own `EVENT` enum is anomaly/change-oriented
+  (`NODE_JOIN/LEAVE`, `LINK_DEGRADING/FAILURE`, `ROUTE_CHANGE/RECOVERY`,
+  `SENSOR_ANOMALY/FAILURE`, `PACKET_RETRY/DROP`, `PRIORITY_ROUTE`, `ERROR`)
+  — ordinary successful delivery isn't an anomaly, it's exactly what the
+  periodic `STATISTICS` message's cumulative counters already exist to
+  aggregate.
+- **Alternatives considered:** Emit an `EVENT` for every reliability
+  callback, letting the GUI's event log double as a full packet trace.
+- **Why alternatives were rejected:** Once real `MSG_DATA` traffic exists
+  (Part F, still pending), this would flood the event log at real traffic
+  volume — directly contradicting Part N's "prefer periodic snapshots for
+  state, event-driven messages for events" guidance, since routine
+  delivery is state, not an event.
+- **Impact:** None currently observable (no live traffic yet); structurally
+  correct for when it exists.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `sensorHealthStr()` mapping: WARMUP->SUSPECT, INVALID->OUT_OF_RANGE (Phase 6)
+- **Decision:** `anomaly_core::SensorState`'s 6 values map to the
+  contract's 6 `sensorHealth` values as: WARMUP->SUSPECT, NORMAL->NORMAL,
+  ANOMALY->ANOMALY, FLATLINE->FLATLINE, STALE->STALE, INVALID->OUT_OF_RANGE.
+- **Reason:** 4 of 6 are exact name matches. WARMUP has no exact match;
+  SUSPECT ("not yet fully trusted") is the closest real concept — a sensor
+  mid-calibration genuinely shouldn't be trusted yet, matching SUSPECT's
+  implied meaning. INVALID has no exact match either; OUT_OF_RANGE is the
+  closest concept — an invalid reading is, practically, one outside any
+  sane range.
+- **Alternatives considered:** Map WARMUP/INVALID to NORMAL (silently
+  hiding the distinction).
+- **Why alternatives were rejected:** Would misrepresent a genuinely
+  different sensor condition as ordinary healthy operation — worse than a
+  slightly-imperfect but honest nearest-match mapping.
+- **Impact:** `test_telemetry_core.cpp`'s
+  `test_sensor_health_mapping_covers_every_state` tests all 6 mappings
+  explicitly.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `HELLO.config.ewmaAlpha` reports the RSSI alpha, not the PDR alpha (Phase 6)
+- **Decision:** `PREDICTOR_RSSI_EWMA_ALPHA` (0.3) is reported, not
+  `PREDICTOR_PDR_EWMA_ALPHA` (0.1) — the contract's schema has exactly one
+  `ewmaAlpha` field for a project with two real, distinct EWMA constants.
+- **Reason:** RSSI smoothing is the more prominent, more frequently
+  referenced EWMA concept in this project's own documentation
+  (implementation-guide.html §5.1's own stated "alpha ~ 0.3" is cited
+  project-wide) — a defensible, documented pick between two real values,
+  not an invented third one.
+- **Alternatives considered:** Report `PREDICTOR_PDR_EWMA_ALPHA` instead;
+  invent an average of the two.
+- **Why alternatives were rejected:** Averaging two unrelated smoothing
+  constants would produce a number with no real meaning. Between the two
+  real options, RSSI's is the more representative single choice.
+- **Impact:** Documented in `docs/gui-compatibility-matrix.md` so the
+  choice is visible, not silently made.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `STATISTICS.endToEndLatencyMs` actually reports per-hop latency, not true end-to-end (Phase 6)
+- **Decision:** `reliability_core::Statistics.lastLatencyMs` (documented,
+  since Phase 4, as per-hop ACK round-trip time) is reported under the
+  contract's `endToEndLatencyMs` field name as-is, with the discrepancy
+  called out explicitly in `docs/gui-compatibility-matrix.md` rather than
+  silently passed off as a true end-to-end measurement.
+- **Reason:** No end-to-end (source-to-sink, multi-hop) latency mechanism
+  exists anywhere in this firmware — building one (e.g. an
+  originally-stamped timestamp carried unchanged through every forward,
+  compared against arrival time at the final destination) would be a real
+  new mechanism, not something to add silently inside a telemetry-mapping
+  pass.
+- **Alternatives considered:** Omit the field entirely (it's required, not
+  optional, per the contract — not a legal option); build a real
+  end-to-end latency mechanism this phase.
+- **Why alternatives were rejected:** The field is required, so omitting
+  it isn't contract-compliant. Building new end-to-end timing machinery is
+  a real reliability-layer feature addition, out of this phase's telemetry
+  scope — not something to invent unprompted.
+- **Impact:** The reported number is real (not fabricated) but represents
+  a narrower quantity than its field name implies — flagged for whoever
+  next touches the reliability layer.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## `ERROR` wiring kept minimal and honest — only `TRANSPORT_INIT_FAILED` (Phase 6)
+- **Decision:** Exactly one real call site (`transport::begin()`'s failure
+  branch in `main.cpp`) calls `telemetry::reportError()` this phase.
+- **Reason:** A systematic search of the current codebase found no other
+  genuine, already-existing firmware fault condition with a real error
+  code/severity/recoverability judgment to report honestly.
+  `reliability::PACKET_DROP` (pool exhaustion, synchronous send rejection)
+  already has a home as an `EVENT`, matching the contract's own worked
+  `ERROR` example concept (`"ROUTE_TABLE_FULL"`) closely enough that
+  duplicating it as both an `EVENT` and an `ERROR` would misrepresent a
+  single real condition as two different severities of problem.
+- **Alternatives considered:** Wire more error codes speculatively (e.g. for
+  conditions that could theoretically happen but have no current firmware
+  detection path).
+- **Why alternatives were rejected:** Would mean inventing an error
+  taxonomy for conditions firmware doesn't actually detect yet — exactly
+  the fabrication this phase's instructions explicitly forbid.
+- **Impact:** `telemetry::reportError()` exists as a real, tested,
+  general-purpose entry point, ready for a future real fault source.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## UCB1 has no dedicated telemetry message — its effect is already visible through `ROUTE_UPDATE` (Phase 6)
+- **Decision:** No new message type or field was added for UCB1 bandit
+  diagnostics (`ucb1_core::ArmSnapshot`/`snapshot()`).
+- **Reason:** The frozen contract defines exactly 10 message types, none
+  for UCB1 — Part 13 of this phase's own instructions explicitly says not
+  to invent a GUI protocol for it. Since `routing::getNextHop()` already
+  incorporates UCB1's ranking (when `ENABLE_UCB1=1`) before telemetry ever
+  reads the resulting decision, `ROUTE_UPDATE.active` already transparently
+  reflects whatever UCB1 chose — no separate wiring needed.
+- **Alternatives considered:** Add a new, unlisted message type (e.g.
+  `UCB1_STATS`); embed bandit stats inside an existing message's optional
+  fields.
+- **Why alternatives were rejected:** Both would violate the frozen
+  contract's explicit prohibition on adding message types/unnecessary
+  fields (Part I: "Do not invent alternate message names... Do not add
+  unnecessary fields").
+- **Impact:** `ucb1_core::snapshot()` remains available for a future,
+  explicitly-requested telemetry extension if the contract is ever revised
+  — not built speculatively now.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+## GUI's topology-animation route-key matching doesn't recognize a real 2-hop `ROUTE_UPDATE` — flagged, not worked around (Phase 6)
+- **Decision:** Confirmed via a real run of firmware-generated
+  `ROUTE_UPDATE` JSON through the GUI's own unmodified `applyTelemetry()`/
+  `routeKey()`/`setRoute()` code (Node.js, verbatim copy of the real
+  functions, `gui-main/` itself never touched) that a real, honestly-2-element
+  `hops` array (e.g. `["A","B"]`) produces `routeKey` `"AB"`, which the
+  GUI's hardcoded topology-animation matcher doesn't recognize (only
+  `"ABS"`/`"ACDS"`/`"AS"` are). Documented as a known limitation rather than
+  worked around on either side.
+- **Reason:** Part O's explicit instruction: "If the GUI rejects a
+  correctly specified contract message, STOP and report the exact
+  mismatch rather than modifying the GUI." The GUI's own `routeKey()` logic
+  is specific to this exact 5-node demo topology's known full paths — not a
+  generic multi-hop renderer — and firmware cannot honestly produce a full
+  path without either fabricating data (rejected above) or a real
+  link-state protocol extension (out of scope).
+- **Alternatives considered:** Pad `hops` with a guessed intermediate node
+  to make `routeKey` match "ABS"/"ACDS"; edit the GUI's `routeKey()`
+  matcher to accept 2-element strings.
+- **Why alternatives were rejected:** Guessing intermediate hops is exactly
+  the fabrication rejected in the `hops`-limitation decision above — a
+  wrong guess would look identical to a right one in the JSON, silently
+  misleading anyone reading the topology diagram. Editing the GUI is
+  explicitly forbidden this phase (and every phase since Phase 4).
+- **Impact:** The topology diagram's animated-path highlighting won't
+  activate for any real multi-hop route until this is resolved by a real
+  design decision (see `docs/gui-compatibility-matrix.md`'s `ROUTE_UPDATE`
+  section); every other real telemetry effect (route candidates panel,
+  link health, prediction, sensors, statistics, events) is unaffected and
+  verified working.
+- **Phase/date:** Phase 6, 2026-08-17.
+
+---
+
+## Hardware team's 0.96" OLED bench sketch's I2C address (`0x78`) flagged as a likely bug, not silently fixed
+- **Decision:** `hardware code/0.96esp32node/0.96esp32node.ino`'s
+  `display.begin(SSD1306_SWITCHCAPVCC, 0x78)` call is flagged in
+  `docs/hardware-readiness.md` as very likely wrong (Adafruit_SSD1306
+  expects the 7-bit address `0x3C`, not the 8-bit write address `0x78`),
+  rather than edited directly.
+- **Reason:** That file belongs to the hardware team's own bring-up
+  sketches (`hardware code/`), not `firmware/PredictiveMesh/`'s own
+  source tree — this session's scope and standing instructions govern
+  `firmware/`/`docs/`, not the hardware team's separate test code. The
+  sibling `1.3esp32node.ino` sketch gets the identical underlying fact
+  right (its own comment explicitly reasons through the 8-bit/7-bit
+  conversion), which is strong corroborating evidence this is a real typo
+  in the 0.96" sketch specifically, not an intentional choice.
+- **Alternatives considered:** Silently correct the 0.96" sketch's address
+  to `0x3C`.
+- **Why alternatives were rejected:** Editing a file outside this
+  project's own firmware/docs scope, without being asked, on an assumption
+  (however well-evidenced) about someone else's test code, oversteps this
+  session's mandate — flagging it clearly, with the exact reasoning, lets
+  the hardware team fix (or knowingly keep) their own file.
+- **Impact:** Firmware's own `OLED_I2C_ADDRESS` (`config.h`) is already the
+  correct `0x3C` and is unaffected either way — no firmware behavior
+  depends on the hardware team's bench-test sketch.
+- **Phase/date:** Hardware bring-up audit, 2026-08-17.
+
+## Two OLED bring-up sketches (0.96" SSD1306, 1.3" SH1106) contradict the guide's "2x identical 0.96" SSD1306" BOM — reported, not resolved
+- **Decision:** `docs/hardware-readiness.md` documents both possible
+  readings (one OLED type ultimately used for both S/C, matching the
+  guide; or two genuinely different OLED modules, deviating from it) as an
+  open, unresolved question requiring team confirmation, rather than
+  assuming either.
+- **Reason:** implementation-guide.html §03's BOM table names exactly one
+  controller (SSD1306) and one size (0.96") for both display-equipped
+  nodes. The hardware team's own evidence is two separate bench-test
+  sketches for two genuinely different controller chips (SSD1306 vs
+  SH1106), which need different Arduino libraries
+  (`Adafruit_SSD1306`/`Adafruit_SH110X`). This is a real contradiction
+  between the system-level source of truth and the newest hardware
+  evidence, exactly the situation this session's standing instructions
+  require surfacing rather than silently picking a side.
+- **Alternatives considered:** Assume the guide is authoritative and only
+  the 0.96"/SSD1306 sketch matters; assume the hardware team's newer
+  evidence supersedes the guide and both nodes use whichever module the
+  1.3"/SH1106 sketch represents.
+- **Why alternatives were rejected:** Either assumption could be wrong in
+  a way that isn't discoverable until real OLED wiring is attempted —
+  guessing here has a real, concrete cost (a whole library dependency
+  choice) if wrong, and the actual answer is a one-question conversation
+  with the hardware team, not something to infer from indirect evidence.
+- **Impact:** No firmware change — OLED wiring remains deferred (unchanged
+  since Phase 0). This sharpens, rather than blocks, that future phase's
+  scope: if the two nodes really do end up on different controllers, that
+  phase will need genuine node-specific OLED handling, not one shared
+  library call.
+- **Phase/date:** Hardware bring-up audit, 2026-08-17.
+
+## New `system-map.md` and `hardware-bringup.md` docs, alongside the existing six required files
+- **Decision:** Two new documents were created — `docs/system-map.md` (the
+  full interface-by-interface hardware-to-GUI data-flow map) and
+  `docs/hardware-bringup.md` (the step-by-step operator/technician
+  bring-up procedure) — in addition to updating the six previously-required
+  docs.
+- **Reason:** Both were explicitly requested deliverables this session
+  (Part 1's system map, Part 19's bring-up document) with a scope
+  (interface producer/consumer/format/timing/failure-behavior across the
+  whole stack; a 14-section flash/test/troubleshooting procedure) too
+  large and too structurally different from the six existing docs' own
+  purposes to fold into any of them without degrading their existing
+  focus.
+- **Alternatives considered:** Fold the system map into `architecture.md`;
+  fold the bring-up procedure into `hardware-readiness.md`.
+- **Why alternatives were rejected:** `architecture.md` documents *what
+  exists and why*, not a field-by-field interface contract table —
+  merging would bloat it well past its own established scope.
+  `hardware-readiness.md` is a pre-flash audit (what's ready/blocked), not
+  an operator procedure — the two serve different readers at different
+  moments (an auditor deciding whether to proceed, vs. a technician
+  actually flashing boards).
+- **Impact:** Both new files are cross-referenced from
+  `hardware-readiness.md`, `known-issues.md`, and `CLAUDE.md`.
+- **Phase/date:** Hardware bring-up audit, 2026-08-17.

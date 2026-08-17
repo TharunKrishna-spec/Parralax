@@ -1,11 +1,56 @@
 # Known Issues
 
-## Hardware not currently available
+## Physical hardware now exists (2026-08-17) — not yet flashed
 
-The physical ESP32 hardware described in the hardware contract does not
-exist yet — it's being built independently by the hardware team. Firmware
-is written against the agreed contract (see [parameters.md](parameters.md))
-but the following cannot be validated until real boards exist:
+Update, Phase 6: 5 physical boards are now in hand (4x ESP32-WROOM-32
+labeled A/B/D/S, 1x classic ESP32 Dev Module labeled "E" — see
+[hardware-readiness.md](hardware-readiness.md) for the full pre-flash
+audit). **Nothing has been flashed yet** — this phase was explicitly
+audit-and-prepare only. Everything below this heading, written while
+hardware genuinely didn't exist, is now superseded by
+[hardware-readiness.md](hardware-readiness.md)'s more detailed Part B
+audit, but is kept here as the running checklist of what's still
+unvalidated.
+
+**Flagged, unresolved: physical board "E" doesn't match any logical node
+name.** Firmware/guide/GUI all require exactly A/B/C/D/S; the physical
+inventory has no "C" and an unexplained "E". See
+[hardware-readiness.md](hardware-readiness.md)'s board-label section and
+[decisions.md](decisions.md#board-labelnode-id-mismatch-flagged-not-silently-resolved-phase-6) —
+needs team confirmation before the MAC table can be filled in.
+
+## Two new, real findings from the hardware team's own bring-up sketches (`hardware code/`)
+
+**Update (2026-08-17):** `hardware code/0.96esp32node/0.96esp32node.ino`
+and `hardware code/1.3esp32node/1.3esp32node.ino` (added to the repo ahead
+of this audit) are the hardware team's own sensor+OLED bench-test
+sketches. Auditing them against `firmware/PredictiveMesh/` and
+implementation-guide.html found:
+
+1. **Likely real bug in the 0.96" sketch's OLED address** (`0x78` where
+   `0x3C` is expected by the Adafruit_SSD1306 API) — very likely causes
+   `display.begin()` to fail on real hardware even with correct wiring.
+   Not fixed here (belongs to the hardware team's own file, out of this
+   session's scope) — flagged for the team. Firmware's own
+   `OLED_I2C_ADDRESS` constant is already correct (`0x3C`), unaffected.
+2. **Real contradiction between the guide's BOM and the hardware
+   evidence:** the guide specifies 2x *identical* 0.96" SSD1306 displays;
+   the hardware team has bench-tested two *different* controllers (0.96"
+   SSD1306 and 1.3" SH1106, needing different Arduino libraries). Not
+   resolved — reported per the standing "identify the contradiction,
+   don't silently resolve it" rule.
+
+Full detail, including the exact sketch excerpts and reasoning:
+[hardware-readiness.md](hardware-readiness.md)'s Part 3/4/5 section and
+[decisions.md](decisions.md#hardware-teams-096-oled-bench-sketchs-i2c-address-0x78-flagged-as-a-likely-bug-not-silently-fixed).
+Neither finding blocks anything currently built — OLED wiring in
+`firmware/PredictiveMesh/` remains deferred, unchanged since Phase 0 —
+but both need team input before that future phase can safely start.
+
+## Hardware not currently flashed
+
+Firmware is written against the agreed contract (see [parameters.md](parameters.md))
+but the following cannot be validated until boards are actually flashed:
 
 - [ ] Actual ESP32 flash test (does this firmware boot on real hardware?)
 - [ ] Actual ESP-NOW packet exchange between two or more real boards
@@ -86,64 +131,61 @@ be there deliberately, e.g. kept out of a public repo root on purpose);
 `CLAUDE.md`'s pointer has been corrected to the real path. Flag if the
 file was actually meant to be at the root and got moved by mistake.
 
-## GUI telemetry contract — now present in the repo (`gui-main/`), firmware does not implement it yet
+## GUI telemetry contract — now implemented for real (Phase 6)
 
-**Update (2026-08-17, GUI integration audit):** The GUI implementation has
-since been added to this repository under `gui-main/gui-main/`, including
-`gui-main/gui-main/docs/gui-telemetry-contract.md` ("Firmware ↔ GUI
-Telemetry Contract v1", status `FROZEN`, revision `1.0`). This **resolves**
-the "not found anywhere" state recorded below on first read of the Phase 3
-task spec — the contract is real, not fabricated, and was authored by the
-GUI side. Its 10 message types (`HELLO`, `HEARTBEAT`, `NODE_STATUS`,
-`LINK_UPDATE`, `ROUTE_UPDATE`, `PREDICTION`, `SENSOR_STATUS`, `EVENT`,
-`STATISTICS`, `ERROR`) match the list the Phase 3 task spec described
-exactly.
+**Update (2026-08-17, Phase 6):** Firmware now implements the frozen
+`mesh-json/v1` contract (`gui-main/gui-main/docs/gui-telemetry-contract.md`)
+for real — `src/telemetry/telemetry_core.h/.cpp` + `src/telemetry/telemetry.h/.cpp`,
+all 10 message types, real JSON over Serial, validated both by a
+94-check host test suite and by running real firmware-generated output
+through the GUI's own unmodified parsing code. See
+[gui-compatibility-matrix.md](gui-compatibility-matrix.md) for the
+complete field-by-field audit and [decisions.md](decisions.md) for every
+enum-mapping/derivation decision. This section is kept (rather than
+deleted) as a historical record of the pre-Phase-6 gap and now records
+what's still genuinely open after implementation:
 
-**What's still true:** firmware implements **none** of this contract's
-wire format today. There is no JSON serialization anywhere in
-`firmware/PredictiveMesh/src/` — `telemetry.cpp` is still the Phase 0 stub
-(`logger::info("telemetry: init ... no OLED/dashboard output yet")`), and
-all Serial output is human-readable log text (`logger::info`/`printf`
-lines), not the newline-delimited JSON envelope
-(`{protocolVersion,type,nodeId,bootId,seq,timestampMs,payload}`) the
-contract requires. No `bootId` concept exists anywhere in firmware; no
-envelope `seq` counter exists (the unrelated `MeshPacket.sequence` field is
-a future *radio-level* dedup field, currently always 0, and must not be
-conflated with the GUI envelope's `seq`). The full field-by-field
-compatibility matrix (what firmware data exists internally vs. what the
-contract needs vs. what's serialized) was produced during the audit and is
-not duplicated here — see the audit report delivered to the user
-(2026-08-17) for the complete GUI-expects / firmware-provides / status
-table across all 10 message types.
+**One real, demonstrated GUI-compatibility limitation, not fixed (per
+explicit instruction not to modify the GUI):** the console's
+topology-diagram animation only recognizes this exact demo topology's
+three known full-path route strings (`"ABS"`, `"ACDS"`, `"AS"`). Firmware's
+`ROUTE_UPDATE.hops` can only ever honestly report 2 elements
+(`[thisNode, nextHop]`) — distance-vector routing never learns a
+destination's full multi-hop path, only the next hop and total distance —
+so any real 2+-hop route produces a `routeKey` the GUI's hardcoded matcher
+doesn't recognize, and the topology diagram's animated path won't
+highlight for it (verified, not predicted — see
+[testing.md](testing.md)'s Phase 6 section). The underlying route data is
+still received and displayed correctly elsewhere (the "Route candidates"
+panel doesn't depend on `routeKey` matching). Resolving this for real
+would mean either a link-state protocol extension (out of scope, a genuine
+future design decision) or the GUI accepting a shorter/different route
+representation — a conversation with the GUI owner, not a firmware-side
+workaround.
 
-**Highest-confidence overlap:** `SENSOR_STATUS` — `anomaly::getTelemetry()`
-already computes nearly every field the contract lists (raw value, median,
-MAD, modified-Z, threshold, flatline state/duration, sensor state,
-validity); it just isn't serialized, and the two `healthState` enum
-vocabularies don't match 1:1 (`WARMUP`/`INVALID` vs. `SUSPECT`/
-`OUT_OF_RANGE`) — resolving that mapping is a real design decision, not
-automatic.
+**Other honest limitations, all documented, none fabricated:**
+`ROUTE_UPDATE.score` reuses the next hop's own `link_score` (no multi-hop
+composite score exists anywhere in this codebase); `ROUTE_UPDATE.reason`
+reports `UNKNOWN` outside the priority/expiry cases `routing_core` can
+actually distinguish (5 of the contract's 8 `routeReason` values have no
+firmware source to report honestly); `STATISTICS.endToEndLatencyMs`
+actually reports per-hop ACK latency, not a true multi-hop measurement (no
+such mechanism exists); `HELLO.mac` is omitted at boot until
+`transport::begin()` succeeds; `HELLO.config.ewmaAlpha` reports one of two
+real EWMA constants this project has (RSSI's, not PDR's); `NODE_JOIN`/
+`NODE_LEAVE` have no firmware event source at all (routing tracks
+liveness, but nothing distinguishes "first contact" from ordinary beacon
+traffic). UCB1 has no dedicated telemetry message (the frozen contract
+defines none, and Part 13 of this phase's instructions explicitly forbade
+inventing one) — its effect is already visible through `ROUTE_UPDATE`
+whenever `ENABLE_UCB1=1`.
 
-**Fields with no firmware source at all yet:** `firmwareVersion` (no
-versioning scheme exists in this project), `bootId`, `ERROR`'s
-`code`/`recoverable` taxonomy (no firmware error-code system exists), and
-`ROUTE_UPDATE`'s per-route `score` and 8-value `routeReason` enum
-(routing_core tracks hop-count and validity, not a score, and
-`RouteEventType` only has 3 coarse values). **Update (Phase 4):** the
-`STATISTICS` message's underlying counters now exist for real —
-`reliability::getStatistics()` (`packetsSent`/`packetsDelivered`/
-`packetsFailed`/`retries`/`duplicatesDropped`/`acknowledgements`/
-`lastLatencyMs`) — but are not yet serialized over JSON, and reflect only
-local per-hop traffic (no automatic traffic generator exists yet — see
-[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
-
-**What would resolve this:** a wire-serialization phase (JSON envelope
-construction + per-message-type field mapping, most naturally the
-`telemetry/` module now that the reliability layer's counters exist to
-feed `STATISTICS`) — not yet scheduled; do not implement it without
-explicit go-ahead, and do not silently redesign firmware enums/structs to
-match the GUI's vocabulary without documenting the mapping decision in
-`docs/decisions.md` first.
+**`STATISTICS`'s counters are real but currently read their honest neutral
+defaults** (`pdr:1.0`, all packet counts `0`) on any fresh boot, because no
+`MSG_DATA` traffic flows yet — see the "Application traffic" entry below
+and [hardware-readiness.md](hardware-readiness.md)'s Part F. Not a bug;
+exactly the same gap Phase 4/5 already documented, now visible in the
+telemetry output itself rather than only in internal counters.
 
 ## Phase 3 anomaly engine — OLED wiring deliberately deferred
 
@@ -255,6 +297,36 @@ this file (the first item additionally needs the same real design
 decision — a real application traffic source — Phase 4 already flagged as
 undecided; nothing UCB1-specific above can be observed until that exists
 either).
+
+## Phase 6 telemetry — not yet run on hardware
+
+`src/telemetry/` (JSON envelope/payload construction, all 10 message
+types, event wiring) is verified two ways: a host-compiled,
+actually-executed unit test suite
+(`firmware/PredictiveMesh/test/test_telemetry_core.cpp` — 94/94 checks,
+see `docs/testing.md`) and a real run of firmware-generated JSON through
+the GUI's own unmodified parsing code (also `docs/testing.md`). Neither is
+a substitute for the real thing:
+
+- [ ] Real telemetry JSON observed over an actual USB/Serial connection at
+      115200 baud, not just generated by a host program
+- [ ] The GUI's real "Connect Hardware" (WebSerial) or "Connect via Bridge"
+      path successfully parses live firmware output end-to-end
+- [ ] `HELLO.mac` populated with a real MAC once `transport::begin()`
+      succeeds on real hardware (currently omitted at boot — honest, not a
+      bug, but unverified in practice)
+- [ ] Telemetry emission volume (6 periodic message types + event-driven
+      ones) confirmed not to overwhelm a real 115200-baud UART or the
+      GUI's own parsing loop at real sustained rates
+- [ ] `TELEMETRY_OFFLINE_TIMEOUT_MS` (currently 3000ms, a placeholder
+      derivation) confirmed sane against real multi-node boot/heartbeat
+      timing
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file (the second item additionally needs the "no live MSG_DATA
+traffic" gap from Phase 4 resolved before `STATISTICS`'s counters would
+show anything but their neutral defaults — see
+[hardware-readiness.md](hardware-readiness.md)'s Part F).
 
 ## Phase 1 routing — not yet run on hardware
 

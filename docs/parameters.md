@@ -154,10 +154,29 @@ definition (one trial per resolved hop-transmission series, never per
 retry), the health-tiering/priority-bypass/loop-prevention ordering, and
 why the compile flag's default must stay `0`.
 
+## Telemetry (Phase 6 — firmware<->GUI wire serialization)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `FIRMWARE_VERSION` | `src/config.h` | `"1.0.0"` | New this phase — no versioning scheme existed before (known-issues.md flagged this as unsourced). A literal string bumped by convention only, not tied to git tags. |
+| `TELEMETRY_HEARTBEAT_INTERVAL_MS` | `src/config.h` | `1000` ms | Matches the frozen GUI contract's own stated `HEARTBEAT` frequency exactly — reproduced, not re-derived. |
+| `TELEMETRY_NODE_STATUS_INTERVAL_MS` | `src/config.h` | `1000` ms | Matches the contract's `NODE_STATUS` frequency. |
+| `TELEMETRY_LINK_INTERVAL_MS` | `src/config.h` | `250` ms | Matches the contract's `LINK_UPDATE` frequency (4 Hz). |
+| `TELEMETRY_PREDICTION_INTERVAL_MS` | `src/config.h` | `250` ms | Matches the contract's `PREDICTION` frequency (4 Hz). |
+| `TELEMETRY_SENSOR_INTERVAL_MS` | `src/config.h` | `1000` ms | Matches the contract's `SENSOR_STATUS` frequency. |
+| `TELEMETRY_STATISTICS_INTERVAL_MS` | `src/config.h` | `1000` ms | Matches the contract's `STATISTICS` frequency. |
+| `TELEMETRY_OFFLINE_TIMEOUT_MS` | `src/config.h` | `3000` ms (`3 * TELEMETRY_HEARTBEAT_INTERVAL_MS`) | New this phase — reported in `HELLO.config.offlineTimeoutMs`, drives the GUI's own client-side staleness clock. Numerically equal to `ROUTING_ENTRY_TIMEOUT_MS` but conceptually distinct (a telemetry-reporting concern, not a mesh-routing one) — kept as its own constant rather than reused. |
+| `telemetry_core::LINE_BUF_SIZE` | `src/telemetry/telemetry_core.h` | `768` bytes | An algorithm-intrinsic buffer bound (comfortably covers the largest real message with headroom under the contract's 4096-byte ceiling), not a deployment tunable — lives in the header, not this file, matching `routing_core::MAX_HOP_COUNT`'s own precedent. |
+
+See [decisions.md](decisions.md) for the full reasoning behind every enum
+mapping (link/prediction state classification, sensor health, route
+reason), the `ewmaAlpha`/`endToEndLatencyMs` field-naming caveats, and why
+`bootId` is a random nonce rather than a persistent counter.
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-Nothing remains in this category as of Phase 5 — the predictor's timing
+Nothing remains in this category as of Phase 6 — the predictor's timing
 parameters were wired in Phase 2, the anomaly engine's in Phase 3, the
-reliability layer's in Phase 4, and UCB1's in Phase 5 (see the tables
-above). This section is kept as a placeholder heading for whatever a
-future phase introduces next.
+reliability layer's in Phase 4, UCB1's in Phase 5, and telemetry's in Phase
+6 (see the tables above). This section is kept as a placeholder heading for
+whatever a future phase introduces next.
