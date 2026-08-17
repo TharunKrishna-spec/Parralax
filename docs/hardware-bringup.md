@@ -2,18 +2,23 @@
 
 Operator/technician procedure for taking the 5-node mesh from "boards on
 the bench" to "full demo running." Written to be followed literally, in
-order. **Two items block real progress past Section 4 and must be resolved
-with the hardware team first** — flagged inline everywhere they matter,
-not just once at the top:
+order.
 
-1. **Real MAC addresses** for all 5 boards — not yet provided.
-2. **Which physical board plays the `NODE_C` role** — the physical
-   inventory is labeled A/B/D/S/E; the mesh needs exactly A/B/C/D/S. See
-   [hardware-readiness.md](hardware-readiness.md).
+**Update (Phase 7, 2026-08-17): both items that originally blocked
+Section 4 are now RESOLVED — the real MAC table and the board-"E"=`NODE_C`
+confirmation were provided by the hardware team.** `core/node_id.h`'s
+`nodeTable()` already carries all five real addresses; Section 4 below is
+no longer a "fill this in" step, only a "verify it's already correct"
+step. This document previously described these as open blockers — kept
+below only where the historical framing is still useful context, corrected
+everywhere it stated current fact.
 
-Do not substitute a guess for either. Everything in Sections 1-3 and the
-general procedure in 5-6 can be followed regardless; Sections 4 onward
-that need a specific NODE_ID/MAC are marked.
+**Still genuinely open, confirm with the hardware team before or during
+this procedure:** OLED controller/size for nodes S and C (Section 2), and
+UART/RESET/BOOT pin behavior (standard for ESP32 DevKit boards, but not
+individually confirmed against silkscreen — see
+[hardware-readiness.md](hardware-readiness.md)). Neither blocks Section 7
+(single-node `NODE_A` bring-up, no OLED involved).
 
 ---
 
@@ -35,13 +40,13 @@ differing only in one compile-time constant (`THIS_NODE_ID`, `src/config.h`).
      A -> C -> D -> S  (backup path, used when B degrades)
 ```
 
-| Node | Role | Direct neighbors | Has OLED | Physical label (per current inventory) |
-|---|---|---|---|---|
-| A | source | B, C, S | no | A |
-| B | relay (primary path) | A, S | no | B |
-| C | relay (backup path) | A, D | yes | **"E" — unconfirmed, see above** |
-| D | relay (backup path) | C, S | no | D |
-| S | sink/root | B, D, A | yes | S |
+| Node | Role | Direct neighbors | Has OLED | Physical label | MAC (confirmed, Phase 7) |
+|---|---|---|---|---|---|
+| A | source | B, C, S | no | A | `C0:CD:D6:CF:B9:B4` |
+| B | relay (primary path) | A, S | no | B | `88:57:21:E0:89:48` |
+| C | relay (backup path) | A, D | yes | **"E" (confirmed)** | `F4:65:0B:48:EE:AC` |
+| D | relay (backup path) | C, S | no | D | `C0:CD:D6:8D:B7:08` |
+| S | sink/root | B, D, A | yes | S | `C0:CD:D6:CF:62:98` |
 
 A sends data toward S. Normally it goes A→B→S. If B's link degrades
 (RSSI/PDR fusion drops below threshold), the predictor reroutes traffic
@@ -56,7 +61,7 @@ routing.
 | Item | Qty | Notes |
 |---|---|---|
 | ESP32-WROOM-32 DevKit board | 4 | Nodes A, B, D, S |
-| Classic ESP32 Dev Module | 1 | The board currently labeled "E" — confirm its NODE_C assignment before flashing (Section 4) |
+| Classic ESP32 Dev Module | 1 | The board labeled "E" — confirmed as `NODE_C` (Phase 7) |
 | 10kΩ linear potentiometer | 5 | One per node, wired to GPIO34 |
 | LDR photoresistor + 10kΩ resistor (voltage divider) | 5 | One per node, wired to GPIO35 |
 | 0.96" or 1.3" I2C OLED module | 2 | For S and C only — **size/controller unresolved, see hardware-readiness.md's Part 3/4/5.** Confirm which module is actually going on these two boards before wiring. |
@@ -87,20 +92,22 @@ be made correctly.
 
 ## 4. Node configuration
 
-**Blocked on the two open items at the top of this document.** Once
-resolved, for each board:
+Real MACs and the board-C confirmation are already in the shared source
+tree (`core/node_id.h`) — nothing to fill in. For each board, only one
+line changes:
 
-1. Open `firmware/PredictiveMesh/src/config.h`.
-2. Set `#define THIS_NODE_ID` to exactly one of `NODE_A`, `NODE_B`,
-   `NODE_C`, `NODE_D`, `NODE_S` — the one matching the physical board about
-   to be flashed. **This is the only line that should ever differ between
-   the five boards' compiled images.**
-3. Once real MAC addresses are known (from Section 6's boot log, or from
-   the teammate directly), fill in `src/core/node_id.h`'s `nodeTable()` —
-   all five `mac[6]` entries, for all five nodes, in the *same* file used
-   by every board's build (this file does not change per-board; it's the
-   one shared address book every node's compiled image carries a full
-   copy of).
+1. Open `firmware/PredictiveMesh/src/config.h`, find the line
+   `#define THIS_NODE_ID NODE_S` (its current committed value — check
+   before editing, don't assume).
+2. Set it to exactly one of `NODE_A`, `NODE_B`, `NODE_C`, `NODE_D`,
+   `NODE_S` — the one matching the physical board about to be flashed
+   (using the table in Section 1: board "E" = `NODE_C`). **This is the
+   only line that should ever differ between the five boards' compiled
+   images.** Do not touch anything else in `config.h` for this step.
+3. `src/core/node_id.h`'s `nodeTable()` — the shared MAC address book — is
+   already correct and identical in every board's build; just sanity-check
+   it once against Section 1's table before the first flash, don't edit it
+   per-board.
 4. Do not touch `MESH_WIFI_CHANNEL` (`config.h`, currently `6`) unless the
    team has picked a different channel after an RF survey at the actual
    flash/demo site — if you do change it, change it once, before flashing
@@ -149,33 +156,43 @@ Expected Serial output, in order, on a healthy boot:
 
 ```
 [INFO] ========================================
-[INFO] Predictive Self-Healing IoT Mesh - Phase 6 firmware
+[INFO] Predictive Self-Healing IoT Mesh - Phase 7 firmware
 [INFO] UCB1 adaptive routing: disabled (default)
 [INFO] Node <X> initialized (role=<ROLE>)
 [INFO] telemetry: init (mesh-json/v1 serialization, Phase 6, bootId=<X>-xxxxxxxx)
-{"protocolVersion":"mesh-json/v1","type":"HELLO",...}
+{"protocolVersion":"mesh-json/v1","type":"HELLO","nodeId":"<X>",...,"payload":{...,"mac":"XX:XX:XX:XX:XX:XX",...}}
 [INFO] WiFi station mode set
 [INFO] WiFi channel fixed to 6
 [INFO] ESP-NOW initialized
 [INFO] ESP-NOW callbacks registered
-[INFO] Own MAC address: XX:XX:XX:XX:XX:XX (record this in core/node_id.h's NODE_TABLE once hardware exists)
+[INFO] Own MAC address: XX:XX:XX:XX:XX:XX (verify this matches core/node_id.h's NODE_TABLE entry for this node)
 [INFO] Peer added: FF:FF:FF:FF:FF:FF   <- broadcast peer, always succeeds
-[WARN] Peer MAC not yet configured for node <neighbor> - see docs/known-issues.md   <- EXPECTED until MACs are filled in
+[INFO] Peer added: XX:XX:XX:XX:XX:XX   <- one per direct neighbor (Section 1's table) — real MACs now register for real, Phase 7
 [INFO] routing: init (distance-vector + priority override, Phase 1)
-[INFO] predictor: init (RSSI EWMA/slope + PDR + staleness fusion, Phase 2)
-[INFO] Phase 6 firmware ready - entering main loop
+[INFO] predictor: init (RSSI EWMA/slope + PDR fused into link_score; independent staleness fast-path, Phase 2)
+[INFO] anomaly: boot calibration complete for both sensors
+[INFO] reliability: init (hop-by-hop ACK + bounded retry + duplicate filter + forwarding, Phase 4)
+[INFO] apptraffic: init (NODE_A -> NODE_S demo workload, Phase 7, interval=2000ms)   <- NODE_A only; silent on every other node
+[INFO] Phase 7 firmware ready - entering main loop
 [DEBUG] alive uptime_ms=... free_heap=...
 {"protocolVersion":"mesh-json/v1","type":"HEARTBEAT",...}    <- every 1000ms from here on
 ```
+
+Note (Phase 7.1): `WiFi.mode(WIFI_STA)` and the real MAC read now happen
+immediately before `telemetry::init()`, so the very first `HELLO` line
+above genuinely carries the real MAC (`payload.mac`), not omitted as in
+earlier phases.
 
 | Line | Expected | Indicates failure if... |
 |---|---|---|
 | Node/role line | `Node <letter> initialized (role=<ROLE>)` | Wrong letter/role -> `THIS_NODE_ID` was set wrong before this build |
 | `telemetry: init ... bootId=...` | A real bootId string, non-empty | Missing entirely -> build is stale/wrong binary |
+| `HELLO`'s `payload.mac` | A real, non-`00:00:00:00:00:00` MAC, matching Section 1's table for this node | Missing or all-zero -> stop, this is a real firmware regression (Phase 7.1's MAC-before-HELLO fix broke) |
 | WiFi channel line | `WiFi channel fixed to 6` (or the team's chosen channel) | `Failed to set WiFi channel` -> real hardware fault, stop and check the board |
 | ESP-NOW init | `ESP-NOW initialized` | `esp_now_init() failed` -> real hardware fault |
-| Own MAC address line | A real, non-`00:00:00:00:00:00` MAC | All-zero -> something is very wrong (WiFi didn't actually initialize) |
-| `Peer MAC not yet configured` warnings | Expected, for every neighbor, until MACs are filled in | Absence of this warning *after* MACs are filled in but a MAC is still wrong -> check `node_id.h` |
+| Own MAC address line | Matches the `HELLO` MAC above, and matches Section 1's table for this node | Mismatch against Section 1's table -> wrong board flashed as this `NODE_ID`, or a transcription error in `node_id.h` — stop and recheck before continuing |
+| `Peer added:` lines | One per direct neighbor (Section 1), no `Peer MAC not yet configured` warnings | A `[WARN] Peer MAC not yet configured` line appearing -> the binary wasn't actually built from the current source tree (real MACs exist as of Phase 7) — rebuild and reflash |
+| `apptraffic: init` line | Present **only** on the board flashed as `NODE_A` | Present on any other node -> `THIS_NODE_ID` was set wrong for that board |
 | Main loop reached | `Phase 6 firmware ready - entering main loop` | Anything before this that halts (`while(true) delay(1000)`) -> transport init failed; a real `ERROR` JSON line (`TRANSPORT_INIT_FAILED`) is also emitted right before the halt |
 | Periodic HEARTBEAT/etc. JSON lines | One per second at minimum | No JSON lines at all -> telemetry isn't running; check for a crash/reset loop instead |
 

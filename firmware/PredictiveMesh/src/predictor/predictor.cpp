@@ -48,7 +48,7 @@ namespace predictor {
 
 void init() {
   predictor_core::init(g_state, THIS_NODE_ID);
-  logger::info("predictor: init (RSSI EWMA/slope + PDR + staleness fusion, Phase 2)");
+  logger::info("predictor: init (RSSI EWMA/slope + PDR fused into link_score; independent staleness fast-path, Phase 2)");
 }
 
 void onPacketReceived(const MeshPacket& pkt, int8_t rssi) {

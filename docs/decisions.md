@@ -3110,3 +3110,21 @@ entries go at the bottom. Format:
 - **Impact:** Two wording fixes (Findings 1/2, detailed above); everything
   else confirmed already accurate.
 - **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Predictor init log line corrected to match the Finding 1 doc fix
+- **Decision:** `predictor.cpp`'s boot log line changed from
+  `"predictor: init (RSSI EWMA/slope + PDR + staleness fusion, Phase 2)"`
+  to `"predictor: init (RSSI EWMA/slope + PDR fused into link_score;
+  independent staleness fast-path, Phase 2)"`.
+- **Reason:** Missed during the Phase 7.1 Finding 1 pass — that pass fixed
+  `architecture.md`'s equivalent "staleness fusion" wording but not this
+  live firmware string, which an operator will actually see on the Serial
+  monitor during bring-up (quoted directly in
+  `docs/hardware-bringup.md`'s Section 6 first-boot checklist). Same
+  overclaiming, same fix.
+- **Alternatives considered:** N/A.
+- **Impact:** String-literal-only change, no logic change. Verified via a
+  real ESP32 compile (0 errors/0 warnings, 915,976 bytes flash — 48 bytes
+  more than the prior string, exactly the length difference). No host
+  test touches log strings, so no test change needed.
+- **Phase/date:** Phase 7.1, 2026-08-17.
