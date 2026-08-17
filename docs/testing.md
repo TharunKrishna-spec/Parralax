@@ -4,6 +4,89 @@ No physical hardware exists yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 4 — hop-by-hop reliable delivery, actually compiled and run (host g++) + real ESP32 compile
+
+### 1. Host tests (packet identity + duplicate filter + retry/timeout + statistics)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/reliability/reliability_core.cpp test_reliability_core.cpp -o test_reliability_core
+(clean compile, zero warnings)
+$ ./test_reliability_core
+... (88 checks, see below)
+88/88 checks passed
+EXIT_CODE=0
+```
+
+18 test functions, hand-verified against the actual algorithm (see the
+comments in `test/test_reliability_core.cpp` for the worked timing
+arithmetic, e.g. the exact tick sequence that exhausts
+`RELIABILITY_MAX_RETRIES`):
+
+| # | Scenario | Test |
+|---|---|---|
+| 1 | A fresh identity is never a duplicate | `test_new_identity_not_duplicate` |
+| 2 | The same identity seen again within TTL is a duplicate | `test_repeat_identity_is_duplicate` |
+| 3 | Identity is the (source, sequence) pair, not sequence alone | `test_identity_is_source_and_sequence_pair` |
+| 4 | Duplicate cache expiry | `test_duplicate_cache_expiry` |
+| 5 | Duplicate cache eviction when full | `test_duplicate_cache_eviction_when_full` |
+| 6 | beginTx reserves distinct slots for concurrent hop-transmissions | `test_begin_tx_reserves_distinct_slots` |
+| 7 | beginTx refuses once the pending pool is exhausted | `test_begin_tx_pool_exhaustion` |
+| 8 | A matching ACK resolves the pending transmission | `test_matching_ack_resolves_pending_tx` |
+| 9 | An ACK for an unknown identity is never fabricated as a match | `test_unmatched_ack_is_not_fabricated` |
+| 10 | No timeout fires before the deadline | `test_tick_timeouts_silent_before_deadline` |
+| 11 | A first timeout fires RETRY | `test_tick_timeouts_fires_retry` |
+| 12 | Exhausting all retries produces exactly one FAILED | `test_tick_timeouts_exhausts_retries_then_fails` |
+| 13 | Part 9's worked example: 1 packet + 2 retries + success | `test_part9_one_packet_two_retries_then_success` |
+| 14 | recordImmediateFailure counts an untracked failure | `test_record_immediate_failure` |
+| 15 | Concurrent pending entries resolve independently | `test_concurrent_pending_entries_independent` |
+| 16 | Sequence numbers are monotonic per node | `test_next_sequence_monotonic` |
+| 17 | cancelTx immediately fails a reserved slot | `test_cancel_tx_immediate_failure` |
+| 18 | tickTimeouts respects the caller's maxOut cap | `test_tick_timeouts_respects_max_out` |
+
+Re-ran the full existing suite alongside this one to confirm nothing
+regressed: `test_routing_core` 21/21, `test_predictor_core` 31/31,
+`test_anomaly_core` 50/50, `test_reliability_core` 88/88 — **190/190
+total, all four host suites, actually run.**
+
+**What this is not:** no real ESP-NOW, no real MAC addresses, no simulated
+radio loss/reordering — every input is a hand-constructed identity/
+timestamp, every expected output worked by hand against
+`reliability_core`'s own documented state machine (see
+[decisions.md](decisions.md) for the exact retry/timeout/statistics
+semantics). `reliability.cpp` (the Arduino-facing adapter — real
+`MeshPacket` construction, `transport::send()`, ACK wire parsing,
+forwarding) is untested by this harness, same caveat as every prior
+phase's adapter half — reviewed by hand, validated by the real ESP32
+compile below.
+
+### 2. Real ESP32 compilation (whole sketch, Phase 0 + 1 + 2 + 3 + 4)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all
+Sketch uses 906856 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 47664 bytes (14%) of dynamic memory, leaving 280016 bytes for local variables. Maximum is 327680 bytes.
+```
+
+Clean on the first attempt — 0 errors, 0 warnings. First real use of
+`esp_now_send()` for genuine unicast traffic (`MSG_DATA`/`MSG_ACK`) in this
+project — Phase 0/1's only real send was `routing`'s broadcast beacon.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (reliability math, all 4 suites) | **verified** — 190/190, see above |
+| ESP32 COMPILATION (whole sketch) | **verified** — clean, 0 warnings, 0 errors, `esp32:esp32` core 3.3.11 |
+| PHYSICAL HARDWARE | **not yet verified** — no boards exist; see "Hardware-dependent tests" below |
+
+**No live application traffic yet:** `reliability::send()` is real,
+tested, and callable, but nothing in the current firmware calls it
+automatically — see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented).
+This means the forwarding/ACK/retry path, while fully implemented and
+host-tested via `reliability_core`, has not been exercised end-to-end with
+real `MSG_DATA` traffic even in principle (no traffic exists to generate
+it) — a distinct gap from "not run on hardware," since no hardware exists
+for *anything* in this project yet.
+
 ## Phase 3 — sensor-health state machine, actually compiled and run (host g++) + real ESP32 compile
 
 ### 1. Host tests (median/MAD calibration + modified Z-score + flatline + debounce/recovery + staleness)
@@ -379,19 +462,26 @@ All marked **NOT RUN — HARDWARE NOT AVAILABLE**, per
 - [ ] `analogRead()` on GPIO34/35 behaves correctly with ESP-NOW active
 - [ ] OLED (SSD1306) answers at `0x3C` on GPIO21/22 (Nodes S, C)
 - [ ] Buzzer drives correctly on GPIO25
+- [ ] Two boards exchange a real unicast `MSG_DATA`/`MSG_ACK` pair (Phase 4)
+- [ ] A real hop-by-hop retry actually fires after a genuine dropped frame
+- [ ] Real forwarding across 2+ hops (e.g. A -> C -> D -> S) delivers correctly
+- [ ] PDR observed from real hardware send/ACK outcomes (not just the wired mechanism)
 
 No fake or predicted results are recorded for any of the above. Do not
 mark any of these as passed until they've actually run on real hardware.
 
 ## What's still deliberately untested (later-phase stubs)
 
-Anything belonging to a stub module (`anomaly::evaluate()`,
-`reliability::onSendResult()`, `telemetry::init()`) has no meaningful test
-beyond "does it compile and return its documented safe default" — there's
-no algorithm behind it yet to verify.
+Anything belonging to a stub module (`telemetry::init()`) has no
+meaningful test beyond "does it compile and return its documented safe
+default" — there's no algorithm behind it yet to verify.
 `routing::selectNextHop()`/`getNextHop()` are no longer in this category as
-of Phase 1, and `predictor::linkScore()`/`isUnhealthy()` are no longer in
-this category as of Phase 2 — see the routing_core and predictor_core test
-suites above. The one real gap within predictor is the PDR evidence
-stream's live wiring (not the math) — see
-[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2).
+of Phase 1, `predictor::linkScore()`/`isUnhealthy()` as of Phase 2,
+`anomaly::evaluate()`/the sensor state machine as of Phase 3, and
+`reliability`'s packet identity/ACK/retry/duplicate-filter/forwarding as of
+Phase 4 — see the four *_core test suites above. The one real gap left
+anywhere in this stack is `reliability::send()`'s live *caller* (not its
+mechanism) — see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented),
+the same category of gap Phase 2 documented and accepted for PDR itself,
+now resolved one layer up.

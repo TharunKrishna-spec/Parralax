@@ -232,6 +232,56 @@
 #define ANOMALY_STALE_TIMEOUT_MS (3 * SENSOR_SAMPLE_INTERVAL_MS)
 
 // ============================================================
+// RELIABILITY (Phase 4)
+// ============================================================
+// Bounded retransmit ceiling for one hop-transmission (implementation-
+// guide.html §5.4: "bounded retransmit", no numeric value given). 3 matches
+// this project's already-established "tolerate up to 3" convention
+// (PREDICTOR_CONSECUTIVE_BAD_COUNT/GOOD_COUNT, and ROUTING_ENTRY_TIMEOUT_MS's
+// "3x the beacon interval" derivation) rather than inventing an unrelated
+// number. See docs/decisions.md.
+#define RELIABILITY_MAX_RETRIES 3
+
+// How long one hop-transmission attempt waits for its application-level
+// MSG_ACK before being declared timed-out (Part 5). No numeric value is
+// given by the guide - a starting/placeholder figure, expected to be
+// re-tuned once real hardware round-trip timing exists. RELIABILITY_MAX_RETRIES
+// bounds RESENDS (beyond the original attempt), so the worst case is
+// (1 + RELIABILITY_MAX_RETRIES) attempts = 4 * 200ms = 800ms before a
+// hop-transmission is declared FAILED - resolving well before
+// PREDICTOR_STALENESS_TIMEOUT_MS (2000ms), so a truly dead link's PDR
+// degrades (via real onAckReceived/tickTimeouts failures) before the
+// predictor's independent staleness fast-path would otherwise have to
+// catch it from silence alone. See docs/decisions.md.
+#define RELIABILITY_ACK_TIMEOUT_MS 200
+
+// Fixed-size pool of concurrently-tracked outgoing hop-transmissions (this
+// node's own originated sends plus anything it is currently forwarding).
+// NODE_ID_COUNT-1 (4) is the maximum number of distinct hop-transmissions
+// this 5-node topology could plausibly have in flight from one node at
+// once - a defensible fixed bound, no dynamic allocation, matching this
+// project's established fixed-array convention (RssiWindow, calBuffer,
+// candidates[][]). See docs/decisions.md.
+#define RELIABILITY_MAX_PENDING 4
+
+// Duplicate-detection cache size (Part 6) - recently-seen (source,
+// sequence) identities. Larger than NODE_ID_COUNT because each of the
+// other 4 nodes can have more than one recent sequence in flight
+// (original + retries, or original + one in-progress forward). A
+// starting/placeholder figure, expected to be re-tuned once real hardware
+// traffic patterns exist. See docs/decisions.md.
+#define RELIABILITY_DUP_CACHE_SIZE 16
+
+// How long a recorded (source, sequence) identity stays "seen" for
+// duplicate-detection purposes. Set comfortably above the worst-case
+// in-flight window for one hop-transmission's own retries
+// (RELIABILITY_MAX_RETRIES * RELIABILITY_ACK_TIMEOUT_MS = 600ms), so a
+// legitimate retransmission of the same packet is still recognized as a
+// duplicate for its whole real lifetime, while old entries eventually free
+// up for reuse. See docs/decisions.md.
+#define RELIABILITY_DUP_CACHE_TTL_MS 2000
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

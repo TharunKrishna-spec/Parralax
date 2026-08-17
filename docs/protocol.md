@@ -1,15 +1,17 @@
 # Protocol — `MeshPacket` wire frame
 
-Status: **unchanged since Phase 1; neither Phase 2 (predictor) nor Phase 3
-(anomaly) added any wire changes.** `link_score` is a purely local
-quantity — each node's own evaluation of its own direct radio links,
-consumed only by that same node's own routing decision. Anomaly flags are
-detected and logged locally, not yet transmitted anywhere. See
+Status: **struct layout unchanged since Phase 0 — Phase 4 is the first
+phase to populate `sequence` for real and to actually construct/parse
+`MSG_ACK`, but adds zero new bytes to the frame.** `link_score` is a
+purely local quantity — each node's own evaluation of its own direct radio
+links, consumed only by that same node's own routing decision. Anomaly
+flags are detected and logged locally, not yet transmitted anywhere. See
 [decisions.md](decisions.md#no-meshpacketwire-format-changes-needed-for-phase-2)
 and
 [decisions.md](decisions.md#no-meshpacketwire-format-changes-for-anomaly-flags-in-phase-3)
-for the full reasoning (and why both were considered decisions, not
-oversights). Phase 0 defined this struct
+for the Phase 2/3 reasoning, and
+[decisions.md](decisions.md#packet-identity-is-source-sequence-reusing-meshpackets-existing-header-fields--no-new-wire-format)
+for Phase 4's use of the existing `sequence` field. Phase 0 defined this struct
 (`firmware/PredictiveMesh/src/core/packet.h`) and the ESP-NOW transport
 that carries it. Phase 1 is the first phase that actually constructs and
 parses one: `src/routing/routing.cpp` sends `MSG_HEARTBEAT` beacons
@@ -68,13 +70,20 @@ full 81-byte frame if the payload is smaller.
 enum MessageType : uint8_t {
   MSG_HEARTBEAT = 0,  // periodic liveness / link-quality probe between direct neighbors
   MSG_DATA      = 1,  // application payload (sensor reading, anomaly flag, ...)
-  MSG_ACK       = 2,  // hop-by-hop delivery acknowledgement (§5.4, not yet implemented)
+  MSG_ACK       = 2,  // hop-by-hop delivery acknowledgement (§5.4) — Phase 4
 };
 ```
 
 Three values, matching exactly what implementation-guide.html names: the
 main loop flowchart's "Build outgoing frame (heartbeat / data / priority)"
 step, and §5.4's ACK. No speculative fourth type has been added.
+`MSG_DATA` and `MSG_ACK` are both real and exchanged as of Phase 4 — see
+[architecture.md](architecture.md#reliability-layer-phase-4). `MSG_ACK`'s
+payload is `AckWire{source, sequence}` (3 bytes, packed — see
+`src/reliability/reliability.cpp`), identifying which `MSG_DATA` packet is
+being acknowledged; `MSG_ACK` packets are never themselves acknowledged
+(fire-and-forget — see
+[decisions.md](decisions.md#ack-packets-are-fire-and-forget--never-themselves-acknowledged)).
 
 ## `priority`
 
@@ -102,10 +111,15 @@ single-hop, not-yet-routed packet.
 
 Per-source monotonically increasing counter, 16-bit. Exists for the
 duplicate filter described in §5.4 ("a sequence-number-based duplicate
-filter drops repeats caused by retransmits or multi-path delivery") — not
-implemented yet, so `packetInit()` currently always leaves it at 0.
-Ownership (who increments it, and when it wraps) belongs to whichever
-module implements the reliability layer.
+filter drops repeats caused by retransmits or multi-path delivery") — real
+as of Phase 4. `packetInit()` still leaves it at 0 (structural default);
+`reliability::send()` assigns a fresh value via
+`reliability_core::nextSequence()` for every newly-originated `MSG_DATA`
+packet, and a forwarding node never reassigns it — it rides unchanged with
+`source` as the packet's identity for its entire multi-hop lifetime. See
+[decisions.md](decisions.md#packet-identity-is-source-sequence-reusing-meshpackets-existing-header-fields--no-new-wire-format)
+for why this is deliberately a different concept from the GUI telemetry
+contract's own envelope `seq`.
 
 ## `timestamp_ms`
 
@@ -147,15 +161,20 @@ specific node.
 
 ## What's deliberately NOT in this packet yet
 
-- **No TTL / hop-count on `MeshPacket` itself.** Resolved for Phase 1 as
-  "not needed yet," not "decided and added" — route advertisements are
-  single-hop by construction (standard distance-vector), and Phase 1 does
-  not implement actual hop-by-hop relaying of a received `MSG_DATA`
-  packet (routing only *decides* a next hop; nothing yet acts on that
-  decision for someone else's packet — that's tied to the reliability
-  layer's hop-by-hop ACK mechanism, §5.4, still not implemented). Revisit
-  when that layer is built. See
-  [decisions.md](decisions.md#no-ttlhop-count-field-added-to-meshpacket-in-phase-1).
+- **No TTL / hop-count on `MeshPacket` itself — revisited, still not
+  added, as of Phase 4.** Phase 1's original reasoning ("not needed yet...
+  revisit when [the reliability/forwarding] layer is built") explicitly
+  pointed at this phase as the point to reconsider. Phase 4 does now
+  implement real hop-by-hop relaying of received `MSG_DATA` packets, and
+  the question was revisited for real — the conclusion is still no new
+  field, but now for a different, positive reason: loop prevention relies
+  on `routing_core`'s already-proven correctness (a node never selects
+  itself as next hop), a new `nextHop != prevHop` guard, and the Part 6
+  duplicate filter as defense in depth, rather than on a TTL ceiling. See
+  [decisions.md](decisions.md#forwarding-loop-prevention-relies-on-routing_core-correctness--a-next-hop-not-prev-hop-guard--the-duplicate-filter--no-new-ttl-field)
+  for the full reasoning, superseding
+  [decisions.md](decisions.md#no-ttlhop-count-field-added-to-meshpacket-in-phase-1)'s
+  original (now resolved) open question.
 - **No CRC/checksum field.** ESP-NOW/WiFi already provides frame-level
   integrity checking (FCS) at the 802.11 MAC layer below ESP-NOW; a
   duplicate application-level checksum wasn't asked for and isn't obviously
@@ -165,15 +184,32 @@ specific node.
   Phase 1**: it rides inside `MeshPacket.payload` as `MSG_HEARTBEAT`, not a
   new `MessageType`. See the route-advertisement payload section above.
 
-## Sending/receiving pattern (for when this gets used)
+## Sending/receiving pattern (real as of Phase 4)
+
+Application-level sending goes through `reliability::send()`, not a raw
+`transport::send()` call — it assigns a real sequence number, resolves the
+next hop via the Phase 1/2 routing decision, and tracks the hop-
+transmission for ACK/retry:
+
+```cpp
+uint8_t payload[] = { /* ... */ };
+bool inFlight = reliability::send(NODE_S, payload, sizeof(payload), /*priority=*/false);
+// inFlight == true means the frame is in flight and being tracked — NOT
+// that delivery is confirmed. See docs/decisions.md for why the ESP-NOW
+// send callback alone is never treated as delivery evidence.
+```
+
+`reliability::send()`'s own implementation (`src/reliability/reliability.cpp`)
+shows the low-level pattern this builds on:
 
 ```cpp
 MeshPacket pkt;
-packetInit(pkt, MSG_DATA, THIS_NODE_ID, NODE_S);
-pkt.timestamp_ms = millis();
+packetInit(pkt, MSG_DATA, THIS_NODE_ID, destination);
+pkt.sequence = reliability_core::nextSequence(state);  // Phase 4 — see decisions.md
 pkt.payload_len = /* fill payload, set len */;
+pkt.timestamp_ms = millis();
 
-transport::send(destMac, reinterpret_cast<const uint8_t*>(&pkt), packetWireSize(pkt));
+transport::send(nodeInfo(nextHop).mac, reinterpret_cast<const uint8_t*>(&pkt), packetWireSize(pkt));
 ```
 
 ```cpp
@@ -182,6 +218,6 @@ void onTransportRx(const transport::RxEvent& evt) {
 
   MeshPacket pkt;
   memcpy(&pkt, evt.data, min(evt.len, sizeof(MeshPacket)));  // never cast evt.data directly
-  // ... read pkt.* fields safely from here
+  // ... hands the same (pkt, rssi) to routing::/predictor::/reliability::onPacketReceived()
 }
 ```

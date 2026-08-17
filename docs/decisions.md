@@ -1225,4 +1225,349 @@ entries go at the bottom. Format:
   docs file, since it's an audit finding tied to this specific moment in
   both codebases, not a standing architectural decision.
 - **Phase/date:** Post-Phase-3, pre-Phase-4, 2026-08-17.
-- **Phase/date:** Phase 3, 2026-08-17.
+
+## reliability_core split out as an Arduino-free pure module (Phase 4)
+- **Decision:** `src/reliability/` follows the exact routing_core/
+  predictor_core/anomaly_core split from Phases 1-3: `reliability_core.h/.cpp`
+  (packet identity, duplicate cache, pending-transmission tracking,
+  retry/timeout state machine, statistics — zero Arduino/ESP-NOW
+  dependency, every function takes `now` explicitly) and `reliability.h/.cpp`
+  (the Arduino-facing adapter — real `MeshPacket` construction/parsing,
+  `transport::send()`, `millis()`, `logger::*`). `reliability_core` also
+  deliberately never stores payload bytes — a resend needs the *original*
+  bytes, and only the adapter (which owns `transport::send()`) has any
+  business owning them; the adapter keeps its own `g_pendingPackets[]`
+  array, parallel-indexed to `reliability_core`'s own `pending[]` by slot.
+- **Reason:** Retry/timeout/duplicate-filter bookkeeping is real
+  algorithmic logic (not just glue), and this project's established
+  pattern is that real algorithmic logic gets verified by a host-compiled
+  test harness, which only means something if the module has no ESP32
+  toolchain dependency.
+- **Alternatives considered:** Fold pending-transmission tracking directly
+  into `reliability.cpp`, tested only via the real ESP32 compile (like
+  `main.cpp` itself).
+- **Why alternatives were rejected:** Every prior phase's decision to split
+  out a pure core paid for itself immediately in bugs caught before ESP32
+  compilation (Phase 2's off-by-one, Phase 3's two bugs); there's no reason
+  this phase's bookkeeping — arguably the most state-machine-heavy of the
+  four — would be exempt from that benefit.
+- **Impact:** `firmware/PredictiveMesh/test/test_reliability_core.cpp` — 18
+  test functions, 88/88 checks, compiled and run with host g++, zero
+  Arduino/ESP-NOW dependency. See docs/testing.md.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## Packet identity is (source, sequence), reusing MeshPacket's existing header fields — no new wire format
+- **Decision:** Part 1's packet identity is `reliability_core::PacketId{source, sequence}`,
+  built directly from `MeshPacket.source`/`MeshPacket.sequence` —
+  fields Phase 0 already defined and Phase 1-3 already documented as
+  reserved for this exact purpose (`packet.h`'s own comment: "per-source
+  monotonically increasing counter, for future duplicate filtering, §5.4").
+  `sequence` is assigned once, by whichever node originates a packet
+  (`reliability_core::nextSequence()`, a per-node monotonic counter
+  starting at 0), and is preserved byte-for-byte unchanged through every
+  hop of a forward (Part 6) — a relay never reassigns it.
+- **Reason:** This identity has to be stable across the packet's entire
+  multi-hop journey (Part 6: "for forwarded packets, preserve the original
+  source identity and sequence identity") for the duplicate filter to work
+  at every hop, not just the first. Reusing the existing header fields also
+  means Phase 4 adds zero new bytes to the wire frame — `protocol.md`'s
+  layout is unchanged.
+- **This identity is explicitly NOT the GUI telemetry contract's envelope
+  `seq`** (`gui-main/gui-main/docs/gui-telemetry-contract.md`). That field
+  doesn't exist in firmware at all yet (see docs/known-issues.md), and even
+  once it does, it will number GUI *telemetry messages*, not mesh
+  *packets* — a `HELLO`/`STATISTICS`/etc. message and a `MeshPacket` are
+  different things at different layers. Conflating the two would silently
+  break either the duplicate filter (if GUI sequence semantics differ) or
+  the telemetry contract (if mesh retransmits altered the GUI's own
+  message numbering). See Part 1's explicit instruction: "Do not reuse the
+  GUI telemetry sequence number."
+- **Alternatives considered:** A separate packet-identity field (e.g. a
+  128-bit UUID) distinct from the existing `sequence` field.
+- **Why alternatives were rejected:** `(source, sequence)` is already
+  exactly what §5.4 asks for ("a sequence-number-based duplicate filter"),
+  already exists in the wire format, and a 16-bit per-source counter is
+  more than sufficient for a 5-node topology's traffic volume — a UUID
+  would be speculative complexity with no real requirement behind it.
+- **Impact:** `core/packet.h`'s `sequence` field comment updated to reflect
+  real (not "future") use. No wire-format bytes added.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## beginTx() reserves a tracking slot BEFORE the real radio send, with cancelTx() for synchronous failures
+- **Decision:** The adapter calls `reliability_core::beginTx()` first
+  (reserving a pending slot, `attemptCount=1`), *then* attempts the actual
+  `transport::send()`. If the pending pool is already full, no radio
+  transmission is ever launched at all. If the real send is rejected
+  synchronously (e.g. an unregistered peer), the adapter calls the new
+  `reliability_core::cancelTx(slot)` to declare failure immediately,
+  rather than reserving the slot and waiting up to
+  `RELIABILITY_ACK_TIMEOUT_MS` to learn something already known for
+  certain.
+- **Reason:** The alternative order (send first, track second) has a real
+  failure mode: if the pool is full at that point, a frame has already
+  gone out over the radio with nothing watching for its ACK — a wasted
+  transmission whose outcome is silently discarded. Reserving first avoids
+  ever launching an untracked frame, and `cancelTx()` avoids delaying a
+  known-synchronous failure behind a timer for no reason (Part 5's "do not
+  block... indefinitely" read in spirit: don't needlessly delay a known
+  outcome either).
+- **Alternatives considered:** Send-first-then-track (rejected above).
+  Also considered: no `cancelTx()` at all, letting a synchronously-rejected
+  send simply time out normally.
+- **Why alternatives were rejected:** A silent, un-tracked wasted
+  transmission is worse than a slightly more complex call order costing
+  one extra core function. Letting a known failure play out through the
+  full timeout/retry cycle (`RELIABILITY_MAX_RETRIES` more wasted attempts,
+  each also synchronously rejected) would multiply that waste for zero
+  benefit — the outcome is already certain.
+- **Impact:** `reliability_core.h`/`.cpp` — `cancelTx()`. Tested directly
+  (`test_cancel_tx_immediate_failure`).
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## ACK packets are fire-and-forget — never themselves acknowledged
+- **Decision:** `MSG_ACK` packets are sent via a direct `transport::send()`
+  call with no `reliability_core::beginTx()` tracking, no retry, and no
+  expectation of a reply.
+- **Reason:** Acknowledging an ACK would require acknowledging *that*
+  acknowledgement too, recursing forever — every real reliable-delivery
+  protocol (TCP included) treats the ACK itself as best-effort. If an ACK
+  is lost, the *original* sender's own retry (of the DATA packet, not the
+  ACK) naturally recovers — the receiver will simply re-ACK the
+  retransmitted DATA packet when it arrives again (Part 6's duplicate
+  filter still catches it, but the ACK still goes out — see the next
+  entry).
+- **Alternatives considered:** A second, lighter acknowledgement tier for
+  ACK packets specifically.
+- **Why alternatives were rejected:** Unbounded recursion risk for a
+  problem the existing DATA-packet retry already solves for free.
+- **Impact:** `reliability.cpp`'s `sendAck()` — one `transport::send()`
+  call, no pending-slot involvement.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## Every received MSG_DATA is hop-ACKed BEFORE the duplicate check, unconditionally
+- **Decision:** `reliability::onPacketReceived()`'s `handleData()` sends
+  the hop-ACK back to `prev_hop` as its very first action — before
+  checking whether the packet is a duplicate, before checking whether it's
+  addressed here, before attempting to forward it.
+- **Reason:** The hop-ACK's meaning is narrowly "the transmission from
+  `prev_hop` to me, right now, over the radio, succeeded" — a fact that is
+  true regardless of what happens to the packet afterward. Withholding the
+  ACK on a duplicate (because "we already have this one") would make
+  `prev_hop` keep retrying a hop-transmission that actually succeeded,
+  wasting `RELIABILITY_MAX_RETRIES` more attempts for no reason — exactly
+  the kind of unnecessary retry Part 4/5 asks to bound.
+- **Alternatives considered:** ACK only on a genuinely new (non-duplicate)
+  packet.
+- **Why alternatives were rejected:** Conflates two different questions —
+  "did this specific radio hop succeed" (always yes, if we're here to ask
+  the question at all) and "has the application already seen this
+  packet" (a separate, receiver-side concern the duplicate filter alone
+  answers). Answering the first question wrong to encode the second would
+  make `prev_hop`'s own retry logic behave incorrectly for a case (a lost
+  ACK, not a lost DATA frame) it isn't designed to detect.
+- **Impact:** `reliability.cpp`'s `handleData()` — `sendAck()` is
+  unconditional, called before `isDuplicateAndRecord()`.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## Forwarding loop prevention relies on routing_core correctness + a next-hop-not-prev-hop guard + the duplicate filter — no new TTL field
+- **Decision:** Part 7's forwarding path adds exactly one new defensive
+  check beyond calling `routing::selectNextHop()`: refuse to forward if
+  the selected next hop equals the packet's own `prev_hop` (would bounce
+  the packet straight back to whoever just sent it). No hop-count/TTL
+  field was added to `MeshPacket`.
+- **Reason:** This revisits, rather than repeats, the Phase 0/1 TTL
+  decision (`docs/decisions.md#no-ttlhop-count-field-added-to-meshpacket-in-phase-1`)
+  now that real forwarding actually exists — that earlier decision's own
+  reasoning ("Phase 1 does not implement actual hop-by-hop relaying...
+  revisit when that layer is built") explicitly pointed at this exact
+  phase as the revisit point. Three independent, already-real mechanisms
+  bound any potential loop without a new field: (1) `routing_core`'s
+  distance-vector table is proven (21/21 tests, including that a node
+  never selects itself as next hop) and this topology is small/fixed (5
+  nodes, max real path 4 hops); (2) the new `nextHop != prevHop` guard
+  catches the most likely accidental case (an immediate one-hop bounce);
+  (3) even in an unlikely transient-table-inconsistency scenario, the
+  duplicate filter (Part 6) recognizes a packet's `(source, sequence)`
+  coming back around and drops it before forwarding it again, bounding any
+  possible loop to at most one extra circuit.
+- **Alternatives considered:** Add a `hop_count`/TTL field to `MeshPacket`,
+  decremented per hop, dropped at zero.
+- **Why alternatives were rejected:** Would be the first new field added to
+  `MeshPacket` since Phase 0, for a failure mode this topology's own
+  proven routing correctness plus two already-existing mechanisms already
+  bound. Speculative protocol growth ahead of an actually-observed problem
+  — the same standard Phase 0/1/2/3 have consistently applied to this
+  struct. Revisit if real hardware testing ever shows an actual loop.
+- **Impact:** `reliability.cpp`'s `handleData()` forward branch. No wire
+  format change; `docs/protocol.md`'s "What's deliberately NOT in this
+  packet yet" TTL entry updated to reflect this as the real revisit
+  decision rather than a still-open question.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## PDR is fed per-attempt, not per-packet — and never from the raw ESP-NOW send callback
+- **Decision:** `predictor::onSendResult(neighbor, success)` is called
+  exactly once per individual unicast *attempt's* outcome: `false` for
+  every attempt that times out (whether or not a retry follows — both
+  `TimeoutAction::RETRY` and `TimeoutAction::FAILED` represent one failed
+  attempt), `true` exactly once when a real `MSG_ACK` matches. It is never
+  fed from `transport::TxCallback`/`onEspNowSent()` (the raw ESP-NOW
+  driver signal) — that callback only confirms the radio accepted/
+  transmitted the frame at the 802.11 layer, not that the application on
+  the other end ever processed it. The Phase 0 stub
+  `reliability::onSendResult(NodeId, bool)` — apparently designed to
+  receive exactly that raw radio signal — is removed rather than repurposed
+  (see the dedicated entry below).
+- **Reason:** Part 3 explicitly requires distinguishing the ESP-NOW send
+  callback from application-level delivery ACK, and forbids treating the
+  former as delivery evidence. Feeding PDR from attempts (not from the
+  final packet-series outcome) matches PDR's own meaning — "packet
+  delivery ratio" is inherently a per-transmission-attempt statistic; a
+  hop-transmission that took 2 failed attempts then succeeded really did
+  experience 2 dropped radio frames and 1 delivered one, and that's the
+  granularity `predictor_core`'s PDR EWMA was already built to consume in
+  Phase 2.
+- **Alternatives considered:** (a) Feed PDR the ESP-NOW `TxCallback`
+  result directly (simplest, but explicitly forbidden by Part 3). (b) Feed
+  PDR once per whole packet series (final success/fail only), not per
+  attempt.
+- **Why alternatives were rejected:** (a) would let a frame that
+  transmitted fine over the radio but never got an application response
+  (e.g. the neighbor's firmware crashed, or its own ACK got lost) look
+  like a healthy link — exactly the false-positive Part 3 warns against.
+  (b) would under-count real degradation: a link needing 2 retries per
+  packet to succeed is measurably worse than one that never needs a retry,
+  but "final outcome only" PDR would report both as 100% — hiding real
+  RF-layer degradation from the very metric meant to detect it.
+- **Impact:** `reliability.cpp`'s `tick()` (RETRY/FAILED branches) and
+  `handleAck()` are the only two call sites for `predictor::onSendResult()`.
+  Resolves the Phase 2 gap documented at
+  [decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2) —
+  the wiring is now real, though see the "no live automatic caller"
+  entry below for what's still not exercised without real application
+  traffic.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## PDR represents per-hop unicast delivery, not end-to-end delivery
+- **Decision:** Every PDR observation `reliability` feeds to `predictor`
+  is scoped to exactly one radio hop — "did THIS node's unicast
+  transmission to THIS direct neighbor succeed" — never "did the packet
+  reach its ultimate, possibly-multi-hop destination."
+- **Reason:** This isn't actually a new choice Phase 4 gets to make —
+  `predictor_core.h`'s own file header already documents this scope
+  explicitly, unchanged since Phase 2: "link_score is always a statement
+  about THIS node's own radio link to that neighbor, never a multi-hop/
+  end-to-end quantity." Phase 4 just had to honor that existing contract
+  when wiring real observations into it, per Part 8's explicit instruction
+  not to mix the two definitions.
+- **Alternatives considered:** An end-to-end delivery ratio (source-to-
+  final-destination), tracked separately or instead.
+- **Why alternatives were rejected:** Would require a fundamentally
+  different mechanism (only the final destination could confirm true
+  end-to-end delivery, requiring its own return-path signal back to the
+  original source — not something any part of this phase's spec asked
+  for) and would conflate two genuinely different questions ("is my radio
+  link to B healthy" vs. "did my packet reach S three hops away") into one
+  number, which Part 8 explicitly forbids doing.
+- **Impact:** `reliability_core::Statistics.packetsDelivered` is
+  documented as per-hop (mirroring PDR's own scope), not end-to-end — see
+  its field comment in `reliability_core.h`.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## reliability::send() has no live automatic caller in Phase 4 — no application data source was invented
+- **Decision:** Nothing in `main.cpp`'s `loop()` calls `reliability::send()`
+  automatically or periodically. The function is real, fully implemented,
+  and tested via `reliability_core`'s host suite plus a real ESP32 compile
+  of the whole adapter — but Phase 4 does not invent what real application
+  payload a node should periodically send, to whom, or how often.
+- **Reason:** No document in this repository (implementation-guide.html,
+  the task specs for any phase so far, or the GUI's own telemetry
+  contract) defines what real periodic application data this mesh's nodes
+  are supposed to exchange over `MSG_DATA`. Inventing one now — e.g. "each
+  node pings the sink every N seconds with its latest sensor reading" —
+  would be exactly the kind of fabricated protocol/schedule this project's
+  standing "no fake data, document rather than silently invent" rule
+  (reinforced in every phase so far, most recently for the Phase 3
+  GUI-telemetry-contract gap) exists to prevent. This is structurally the
+  same category of gap Phase 2 already accepted and documented for PDR
+  itself ("the math and API are complete and independently tested, but
+  nothing calls it yet") — Phase 4 provides the mechanism one layer up
+  (real hop-by-hop reliable delivery, not just the PDR math it feeds), but
+  still has no live traffic source, for the same reason.
+- **Alternatives considered:** Add a minimal periodic "keepalive" unicast
+  ping from each node toward the sink, purely to exercise the pipeline and
+  give PDR real, live numbers once hardware exists.
+- **Why alternatives were rejected:** Even a "minimal ping" requires
+  inventing a schedule, a payload shape, and a purpose — real design
+  decisions with no basis in any existing spec. Building the mechanism
+  correctly and leaving its use to a phase (or explicit instruction) that
+  actually defines the application-level data contract is safer than
+  guessing at one now. `routing`'s own beacon is not a precedent for
+  inventing new traffic here — it exists because distance-vector routing
+  is structurally impossible without periodic advertisements; nothing
+  about reliable delivery requires traffic to exist for its own sake.
+- **Impact:** `reliability::send()` is real, public, and callable by any
+  future phase (or a manual test/demo trigger) with zero further wiring
+  needed. Until something calls it, `reliability_core::Statistics` and
+  live PDR values stay at their initialized defaults on real hardware —
+  documented in `docs/known-issues.md`, not silently implied to be "live."
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## reliability::onSendResult(NodeId, bool) (Phase 0 stub) removed, not repurposed
+- **Decision:** The Phase 0 stub `void onSendResult(NodeId dst, bool success);`
+  (declared in the original `reliability.h`, logged-only, never wired to
+  any real caller in Phases 0-3) is deleted entirely rather than kept or
+  repurposed to receive the raw ESP-NOW `TxCallback` signal.
+- **Reason:** Its name and signature — identical in shape to
+  `predictor::onSendResult()` — was the single most natural place a future
+  maintainer would be tempted to route ESP-NOW's raw `TxCallback` directly
+  into PDR, which is exactly the conflation Part 3 forbids (see the
+  "PDR is fed per-attempt" entry above). Removing it entirely, rather than
+  leaving it as an unwired or repurposed function, avoids that trap by
+  construction. `espnow_transport.cpp`'s own `logger::tx()` call already
+  provides equivalent per-send diagnostic visibility (`[TX] dst=... status=...`)
+  without needing a second hop through `reliability`.
+- **Alternatives considered:** Keep the stub, wire it to the raw
+  `TxCallback`, and use it purely for logging/diagnostics distinct from
+  PDR.
+- **Why alternatives were rejected:** A same-named, similar-shaped,
+  *almost*-but-not-quite-the-real-PDR-signal function sitting right next
+  to the real one is a maintenance hazard, not a diagnostic feature — and
+  `logger::tx()` already covers the diagnostic need. Matches this
+  project's CLAUDE.md guidance to delete code that's confirmed unused
+  rather than leave an ambiguous half-implementation around.
+- **Impact:** `reliability.h`'s public API no longer includes
+  `onSendResult()`. `main.cpp`'s `onTransportTx()` remains the pre-existing
+  no-op it already was in Phases 0-3 — not a regression, since nothing
+  ever called the removed function for real.
+- **Phase/date:** Phase 4, 2026-08-17.
+
+## Statistics counters: packet-series granularity vs. attempt granularity, kept explicitly separate (Part 9)
+- **Decision:** `reliability_core::Statistics` deliberately mixes two
+  different counting granularities, each documented per-field:
+  `packetsSent`/`packetsDelivered`/`packetsFailed` count once per
+  hop-transmission *series* (one (source, sequence, nextHop) triple,
+  however many attempts it took — incremented at `beginTx()`,
+  `onAckReceived()`'s match, and `tickTimeouts()`'s `FAILED` branch /
+  `cancelTx()` / `recordImmediateFailure()` respectively), while
+  `retries`/`acknowledgements` count at individual-*attempt* granularity
+  (`tickTimeouts()`'s `RETRY` branch; `onAckReceived()`'s match). The
+  worked example from Part 9 (1 original + 2 retries + final success) is a
+  direct test (`test_part9_one_packet_two_retries_then_success`):
+  `packetsSent=1`, `retries=2`, `acknowledgements=1`, `packetsDelivered=1`.
+- **Reason:** Part 9 explicitly requires being unambiguous about which
+  granularity each number represents rather than silently picking one and
+  hoping it's obvious. A retry is not a second application packet (Part
+  9: "do not double-count retries as separate application packets"), but
+  it IS a second real attempt worth its own count for diagnosing link
+  quality — both facts need their own field rather than collapsing into
+  one ambiguous "packets" number.
+- **Alternatives considered:** A single unified counting scheme (e.g.
+  count every individual radio transmission as "a packet").
+- **Why alternatives were rejected:** Would make `packetsSent` `+`
+  `retries` conflate "how many distinct application-level things this node
+  tried to deliver" with "how much radio airtime this node used" — two
+  genuinely different, both useful, numbers that Part 9 asked to be kept
+  distinct.
+- **Impact:** `reliability_core.h`'s `Statistics` struct — each field's
+  granularity documented in its own comment, not left implicit.
+- **Phase/date:** Phase 4, 2026-08-17.

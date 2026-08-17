@@ -51,7 +51,12 @@ struct MeshPacket {
   uint8_t  next_hop;         // NodeId this hop's sender intends it to reach next
   uint8_t  priority;         // 0 = normal (quality-optimal routing), 1 = priority (forces shortest-hop, §5.3)
   uint8_t  _reserved0;       // padding — keeps `sequence` 2-byte aligned. Must be 0.
-  uint16_t sequence;         // per-source monotonically increasing counter (future duplicate filtering, §5.4)
+  uint16_t sequence;         // per-source monotonically increasing counter — packet identity together with
+                             // `source` (Phase 4, §5.4): reliability_core::PacketId. Preserved unchanged
+                             // across every hop of a forward; distinct from the GUI telemetry envelope's
+                             // own `seq` field (gui-main/gui-main/docs/gui-telemetry-contract.md), which
+                             // does not exist in firmware yet and numbers GUI messages, not mesh packets.
+                             // See docs/known-issues.md and docs/decisions.md.
   uint16_t _reserved1;       // padding — keeps `timestamp_ms` 4-byte aligned. Must be 0.
   uint32_t timestamp_ms;     // sender's millis() at send time (future reroute-lead-time / staleness use, §07)
   uint8_t  payload_len;      // number of valid bytes in payload[] (<= PACKET_MAX_PAYLOAD)

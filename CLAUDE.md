@@ -20,10 +20,24 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 3 complete** (2026-08-17) — sensor anomaly/failure detection
-(MAD-Z + flatline + a 6-state sensor health machine), on top of the
-Phase 0-2 firmware foundation. See [`docs/phase-log.md`](docs/phase-log.md)
-for the full record.
+**Phase 4 complete** (2026-08-17) — hop-by-hop reliable unicast delivery
+(packet identity, ACK, bounded retry, duplicate filter, forwarding, live
+PDR wiring), on top of the Phase 0-3 firmware foundation. See
+[`docs/phase-log.md`](docs/phase-log.md) for the full record.
+
+A **GUI implementation now exists in this repository**, under
+[`gui-main/`](gui-main/) — a teammate's, not this session's. Its own
+frozen telemetry contract lives at
+[`gui-main/gui-main/docs/gui-telemetry-contract.md`](gui-main/gui-main/docs/gui-telemetry-contract.md).
+**Do not edit anything under `gui-main/`** (the HTML console, the two
+Python bridge/mock scripts, or the contract doc) — see "Workflow rules"
+below. A full GUI-vs-firmware compatibility audit was performed before
+Phase 4 (delivered directly to the user, summarized in
+[`docs/known-issues.md`](docs/known-issues.md)): firmware implements none
+of the GUI's wire format yet (no JSON serialization exists anywhere in
+`src/`), though most of the underlying data the contract needs is now
+real internally (especially sensor telemetry and, as of Phase 4,
+reliability statistics).
 
 What exists and works: Arduino sketch structure (`firmware/PredictiveMesh/`),
 centralized node identity (`THIS_NODE_ID` in `src/config.h`), the
@@ -33,38 +47,34 @@ HELLO/route-advertisement beacons, staleness expiry, and the priority-flag
 override (Phase 1); a real predictor — per-neighbor RSSI EWMA +
 least-squares slope, PDR EWMA, a fused `link_score`, a two-threshold
 debounced hysteresis state machine, and an independent staleness fast-path,
-feeding into NORMAL route selection (Phase 2); and now a real sensor
-anomaly engine — boot-time median/MAD calibration (with a variance safety
-envelope and bounded retry), a modified-Z-score spike/jump detector, an
-independent flatline/stuck detector, and a debounced
+feeding into NORMAL route selection (Phase 2); a real sensor anomaly
+engine — boot-time median/MAD calibration, modified-Z-score spike/jump
+detection, flatline/stuck detection, and a debounced
 `WARMUP/NORMAL/ANOMALY/FLATLINE/STALE/INVALID` state machine, with local
-telemetry (`anomaly::getTelemetry()`) and events, explicitly kept separate
-from routing/link health (Phase 3). Routing, predictor, and anomaly all
-keep the Arduino-free-core / thin-adapter split
-(`src/routing/routing_core.h/.cpp` + `routing.h/.cpp`,
-`src/predictor/predictor_core.h/.cpp` + `predictor.h/.cpp`,
-`src/anomaly/anomaly_core.h/.cpp` + `anomaly.h/.cpp`), each unit-tested
-with a host-compiled g++ harness — 21/21 (routing), 31/31 (predictor),
-50/50 (anomaly) checks passing, see `docs/testing.md`. As of Phase 3, the
-**whole Phase 0+1+2+3 sketch has also been compiled for real** against the
-installed `esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings.
+telemetry and events, kept separate from routing/link health (Phase 3);
+and now a real reliability layer — packet identity (`source`, `sequence`,
+reusing existing `MeshPacket` header fields), real unicast ESP-NOW
+transmission, an explicit application-level `MSG_ACK` distinct from the
+raw ESP-NOW send callback, bounded retry with deterministic timeout, a
+TTL-expiring duplicate filter, minimum loop-safe forwarding via the
+existing routing decision, and — for the first time — `predictor`'s PDR
+fed by real per-attempt delivery outcomes (Phase 4). Routing, predictor,
+anomaly, and reliability all keep the Arduino-free-core / thin-adapter
+split (`src/routing/`, `src/predictor/`, `src/anomaly/`,
+`src/reliability/`, each `*_core.h/.cpp` + adapter `.h/.cpp`), each
+unit-tested with a host-compiled g++ harness — 21/21 (routing), 31/31
+(predictor), 50/50 (anomaly), 88/88 (reliability) — **190/190 total**, see
+`docs/testing.md`. As of Phase 4, the **whole Phase 0+1+2+3+4 sketch has
+also been compiled for real** against the installed `esp32:esp32` core
+3.3.11 (`arduino-cli`) — 0 errors, 0 warnings.
 
-What's stubbed (interfaces only, no algorithms): `reliability/`,
-`telemetry/`. Also not yet built: actual hop-by-hop relaying of a received
-`MSG_DATA` packet (routing decides a next hop; nothing acts on that
-decision for someone else's packet yet — that's the reliability layer's
-job), live PDR evidence (`predictor::onSendResult()` is implemented and
-tested but has no live caller yet — no real unicast traffic exists to
-measure), and OLED wiring for the anomaly flags (Node C — deferred, same
-reasoning as Phase 0's original OLED deferral). See `docs/decisions.md`.
-
-**Unresolved, needs your input:** Phase 3's task instructions referenced an
-external "GUI telemetry contract" (specific message types, GUI panels for
-sensor health) that does not exist anywhere in this repository — flagged
-explicitly rather than fabricated. See
-[`docs/known-issues.md`](docs/known-issues.md#gui-telemetry-contract--referenced-by-the-phase-3-task-spec-not-found-anywhere-in-this-repository).
-Share the real contract, or confirm none exists yet, before any future
-phase claims wire-format compatibility with a GUI.
+What's stubbed (interfaces only, no algorithms): `telemetry/`. Also not
+yet built: any automatic caller of `reliability::send()` (the mechanism is
+real and tested, but no real application data source was invented — see
+`docs/decisions.md`), OLED wiring for the anomaly flags (Node C —
+deferred, same reasoning as Phase 0's original OLED deferral), and JSON
+serialization of any telemetry (the GUI's contract, or otherwise). See
+`docs/decisions.md`.
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
@@ -78,17 +88,22 @@ validates that the firmware *builds*; nothing has run on real silicon yet
 
 ## Next movement
 
-**Waiting on explicit go-ahead for Phase 4** — do not start it
-unprompted. Per the roadmap in implementation-guide.html §06 (Hours
-17-23, "required, not stretch"), the next phase is the reliability layer:
-hop-by-hop ACK, bounded retransmit, sequence-number duplicate filtering,
-and Packet Recovery Ratio logging (§07).
+**Waiting on explicit go-ahead for whatever comes next** — do not start
+anything unprompted. Phase 0-4 covers implementation-guide.html §06's
+"required, not stretch" roadmap through Hours 17-23. Candidates for what
+comes next (none started, none scoped): UCB1 (explicitly deferred every
+phase so far), the final telemetry/reporting system (the natural point to
+decide what real `MSG_DATA` application traffic should flow and wire
+`reliability::send()`/`getStatistics()` into the now-real GUI telemetry
+contract), and OLED wiring (deferred since Phase 0).
 
-Things worth rereading before starting Phase 4:
-- [`docs/decisions.md`](docs/decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2) —
-  the reliability layer's hop-by-hop ACK mechanism is the natural point to
-  finally wire `predictor::onSendResult()` to a real unicast delivery
-  signal; don't build a second, parallel PDR mechanism instead.
+Things worth rereading before starting whatever's next:
+- [`docs/decisions.md`](docs/decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented) —
+  the reliability mechanism (ACK/retry/duplicate-filter/forwarding/PDR
+  wiring) is real and tested, but nothing calls `reliability::send()`
+  automatically yet; deciding what real application data a node should
+  send, to whom, and how often is a real, undecided design question — not
+  something to invent unprompted.
 - [`docs/decisions.md`](docs/decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule) —
   `routing_core::isPriorityOnlyEdge`'s hard exclusion is still active
   alongside real link-health-aware selection, specifically because no
@@ -96,8 +111,8 @@ Things worth rereading before starting Phase 4:
   NORMAL-avoids-the-weak-direct-link behavior. Revisit only once real
   hardware/attenuation data exists to check that condition for real — not
   before.
-- The GUI telemetry contract question above — resolve it before any phase
-  claims wire-format compatibility with a GUI.
+- **GUI ownership is now a durable constraint, not just a Phase-4
+  instruction** — see "Workflow rules" below.
 
 ## Workflow rules (durable — apply every session)
 
@@ -126,3 +141,13 @@ Things worth rereading before starting Phase 4:
   addresses treated as real, no "passing" hardware test that didn't
   actually run on hardware. Mark anything hardware-dependent as
   `NOT RUN — HARDWARE NOT AVAILABLE` until it actually runs.
+- **Do not edit anything under [`gui-main/`](gui-main/)** — the HTML
+  console (`mesh-command-console.html`), the two Python bridge/mock
+  scripts (`serial-bridge.py`, `serial-mock.py`), the GUI's own README, or
+  its telemetry contract
+  (`gui-main/gui-main/docs/gui-telemetry-contract.md`). That's a
+  teammate's code and its frozen contract, introduced ahead of Phase 4 —
+  treat the contract as authoritative for what the GUI expects, and make
+  firmware adapt to it in a future wire-serialization phase, never the
+  other way around. If the contract genuinely needs to change, that's a
+  conversation with the GUI owner, not a firmware-side edit.

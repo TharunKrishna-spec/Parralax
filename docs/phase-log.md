@@ -335,3 +335,103 @@ natural point to finally wire `predictor::onSendResult()` to a real
 unicast delivery signal (see Phase 2's PDR measurement-boundary decision).
 The GUI telemetry contract question above should be resolved before any
 phase claims wire-format compatibility with a GUI.
+
+## Phase 4 — Reliable unicast delivery (hop-by-hop ACK + bounded retry + duplicate filter + forwarding)
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for whatever comes next.
+
+### Objective
+Implement the reliability layer per implementation-guide.html §5.4 and
+this phase's own task spec: a deterministic packet identity, real unicast
+ESP-NOW transmission, an explicit application-level ACK distinct from the
+raw ESP-NOW send callback, bounded retry with deterministic timeout,
+sequence-based duplicate filtering, minimum forwarding, and — for the
+first time — live wiring of Phase 2's `predictor::onSendResult()` PDR path
+to real per-hop delivery observations. A GUI implementation was added to
+the repository immediately before this phase (see the GUI integration
+audit delivered directly to the user, and
+[decisions.md](decisions.md#gui-integration-audit-performed-before-phase-4--no-firmware-changes-made));
+per explicit instruction, the GUI itself (`gui-main/`) was not touched.
+
+### What was built
+- `src/reliability/reliability_core.h/.cpp` (new) — the real algorithm,
+  Arduino-free (mirrors `routing_core`/`predictor_core`/`anomaly_core`'s
+  split): packet identity (`source`, `sequence`); a fixed-size pending-
+  hop-transmission pool with `beginTx`/`cancelTx`/`onAckReceived`/
+  `tickTimeouts`; a TTL-expiring, ring-buffer-replaced duplicate cache
+  (`isDuplicateAndRecord`); and deterministic statistics counters with
+  explicit attempt-vs-packet-series granularity (Part 9).
+- `src/reliability/reliability.h/.cpp` (rewritten from the Phase 0 stub) —
+  the Arduino-facing adapter: real unicast `MSG_DATA`/`MSG_ACK`
+  construction/parsing, `transport::send()` to a resolved peer MAC,
+  hop-ACK-before-duplicate-check receive handling, forwarding via the
+  exact Phase 1/2 `routing::selectNextHop()` decision with loop guards, and
+  `PACKET_TX`/`PACKET_ACK`/`PACKET_RETRY`/`PACKET_DELIVERED`/`PACKET_DROP`/
+  `DUPLICATE_DROPPED`/`PACKET_RECEIVED` events via
+  `reliability::setEventCallback()`. The Phase 0 stub
+  `onSendResult(NodeId, bool)` was removed (not repurposed) — see
+  decisions.md.
+- `src/config.h`: a full `RELIABILITY_*` constant block (max retries, ACK
+  timeout, pending-pool size, duplicate-cache size/TTL) — see
+  [parameters.md](parameters.md) and [decisions.md](decisions.md) for
+  every value's derivation.
+- `firmware/PredictiveMesh/test/test_reliability_core.cpp` (new) — 88/88
+  checks across 18 test functions, including a direct test of Part 9's
+  worked example (1 packet + 2 retries + success) and a concurrent-
+  entries-resolve-independently scenario.
+- `main.cpp` updated: `reliability::onPacketReceived()` wired into
+  `onTransportRx()` alongside routing/predictor; `reliability::tick()`
+  added to `loop()`; `onReliabilityEvent()` logger added; banners → "Phase
+  4 firmware".
+- `core/packet.h`/`core/message_types.h` comments updated — `sequence` and
+  `MSG_ACK` are now real, not "future"/"not yet implemented".
+- Several real, documented design calls: `beginTx()` reserves a tracking
+  slot *before* the real radio send (with `cancelTx()` for synchronous
+  failures), so no frame is ever launched untracked; PDR is fed per
+  individual attempt, never from the raw ESP-NOW send callback; PDR
+  represents per-hop delivery only, never end-to-end; loop prevention
+  relies on routing correctness + a `nextHop != prevHop` guard + the
+  duplicate filter, not a new TTL field (revisiting, and resolving, Phase
+  1's original open question); `reliability::send()` has no automatic
+  live caller — no application data source was invented. See
+  `docs/decisions.md` for all of these in full.
+
+### What was explicitly NOT built (by design)
+Packet Recovery Ratio (§07's alternate-route-recovery metric — the task
+spec's own Part 11 statistics list didn't ask for it, and it requires
+cross-referencing forwarding decisions end-to-end in a way this phase's
+node-local pure-core testing model doesn't cover); any automatic caller of
+`reliability::send()` (no real application data source was invented — see
+decisions.md); UCB1; the final telemetry system; final demo orchestration;
+any GUI changes (explicitly forbidden this phase); any change to
+`gui-main/`.
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_reliability_core.cpp`: real,
+  host-compiled (g++ 15.2.0 / MinGW-W64), actually executed — 88/88
+  checks passed.
+- Full existing suite re-run alongside it to confirm no regressions:
+  `test_routing_core` 21/21, `test_predictor_core` 31/31,
+  `test_anomaly_core` 50/50 — **190/190 total, all four host suites.**
+- **Real `arduino-cli compile` performed** against the full Phase
+  0+1+2+3+4 sketch, `esp32:esp32` core 3.3.11 — clean on the first
+  attempt, 0 errors, 0 warnings (`--warnings all`). First real use of
+  `esp_now_send()` for genuine unicast traffic in this project. See
+  [testing.md](testing.md).
+- No hardware-dependent validation, and no live end-to-end exercise of the
+  forwarding/ACK/retry path even in principle — no real application
+  traffic exists yet to generate it (see
+  [decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Not yet specified by the user. Candidates named in
+implementation-guide.html's own roadmap beyond Hours 17-23 include UCB1
+(explicitly deferred every phase so far), the final telemetry/reporting
+system (would be the natural point to define what real `MSG_DATA`
+application traffic flows and wire `reliability::send()`/`getStatistics()`
+into the now-real GUI telemetry contract), and OLED wiring (deferred since
+Phase 0). Do not start any of these without explicit instruction.

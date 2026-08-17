@@ -124,10 +124,22 @@ for why a broadcast peer is registered in the meantime.
 | `ANOMALY_FLATLINE_RECOVERY_COUNT` | `src/config.h` | `2` samples | Consecutive non-flat samples required to recover FLATLINE → NORMAL — a single changed sample alone must not instantly clear FLATLINE. |
 | `ANOMALY_STALE_TIMEOUT_MS` | `src/config.h` | `450` ms (`3 × SENSOR_SAMPLE_INTERVAL_MS`) | Independent, time-driven staleness check for a sensor's observation stream. In this phase's actual local-ADC wiring this will rarely fire (samples are read synchronously); the mechanism exists because `anomaly_core` is designed to be reusable for a sensor whose observations could genuinely stop arriving. See [decisions.md](decisions.md#sensor-abstraction-is-generic-sensorobservation-not-hardwired-to-the-potentiometerldr). |
 
+## Reliability (Phase 4)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `RELIABILITY_MAX_RETRIES` | `src/config.h` | `3` retries (4 attempts total) | implementation-guide.html §5.4 says "bounded retransmit" with no numeric value. Matches this project's established "tolerate up to 3" convention (`PREDICTOR_CONSECUTIVE_BAD_COUNT`/`GOOD_COUNT`, routing's 3x timeout multiplier). Bounds *resends* beyond the original attempt — total attempts = `1 + RELIABILITY_MAX_RETRIES`. |
+| `RELIABILITY_ACK_TIMEOUT_MS` | `src/config.h` | `200` ms | Not guide-specified — a starting/placeholder figure. Chosen so the worst case (`(1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS` = 800ms) resolves well before `PREDICTOR_STALENESS_TIMEOUT_MS` (2000ms), so a dead link's PDR degrades via real ACK/retry failures before the predictor's own staleness fast-path would otherwise have to catch it from silence alone. |
+| `RELIABILITY_MAX_PENDING` | `src/config.h` | `4` slots | Fixed-size pool of concurrently-tracked outgoing hop-transmissions (`NODE_ID_COUNT - 1`). No dynamic allocation, matching this project's established fixed-array convention. |
+| `RELIABILITY_DUP_CACHE_SIZE` | `src/config.h` | `16` entries | Duplicate-detection cache (Part 6). Larger than `NODE_ID_COUNT` since each of the other 4 nodes can have more than one recent sequence in flight at once. A starting/placeholder figure. |
+| `RELIABILITY_DUP_CACHE_TTL_MS` | `src/config.h` | `2000` ms | How long a recorded `(source, sequence)` identity stays "seen." Set comfortably above the worst-case in-flight window for one hop-transmission's own retries (`RELIABILITY_MAX_RETRIES * RELIABILITY_ACK_TIMEOUT_MS` = 600ms), so a legitimate retransmission is recognized as a duplicate for its whole real lifetime. |
+
+See [decisions.md](decisions.md) for the full reasoning behind each value
+and the retry/timeout/duplicate-filter/statistics semantics they drive.
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-Nothing remains in this category as of Phase 3 — the predictor's timing
-parameters were wired in Phase 2 (see the "Predictor (Phase 2)" table
-above) and the anomaly engine's in Phase 3 (see the "Anomaly (Phase 3)"
-table above). This section is kept as a placeholder heading for whatever a
-future phase (reliability, §5.4) introduces next.
+Nothing remains in this category as of Phase 4 — the predictor's timing
+parameters were wired in Phase 2, the anomaly engine's in Phase 3, and the
+reliability layer's in Phase 4 (see the tables above). This section is
+kept as a placeholder heading for whatever a future phase introduces next.

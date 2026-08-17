@@ -33,6 +33,7 @@ void onTransportRx(const transport::RxEvent& evt) {
 
   routing::onPacketReceived(pkt, evt.rssi);
   predictor::onPacketReceived(pkt, evt.rssi);
+  reliability::onPacketReceived(pkt, evt.rssi);
 }
 
 void onTransportTx(const transport::TxEvent& evt) {
@@ -86,6 +87,25 @@ void onAnomalyEvent(const anomaly::AnomalyEvent& evt) {
                 typeStr, sensorStr, evt.telemetry.raw_value, evt.telemetry.modified_z);
 }
 
+// Phase 4's reliability event stream (hop-by-hop TX/ACK/retry/deliver/
+// drop/duplicate, plus PACKET_RECEIVED for a locally-delivered DATA
+// packet) - logged for now, same pattern as onRouteEvent/onLinkEvent/
+// onAnomalyEvent above. A later phase (telemetry/STATISTICS wiring)
+// subscribes via reliability::setEventCallback() instead of adding a new
+// hook here.
+void onReliabilityEvent(const reliability::ReliabilityEvent& evt) {
+  const char* typeStr =
+      evt.type == reliability::ReliabilityEventType::PACKET_TX         ? "PACKET_TX"
+      : evt.type == reliability::ReliabilityEventType::PACKET_ACK      ? "PACKET_ACK"
+      : evt.type == reliability::ReliabilityEventType::PACKET_RETRY    ? "PACKET_RETRY"
+      : evt.type == reliability::ReliabilityEventType::PACKET_DELIVERED ? "PACKET_DELIVERED"
+      : evt.type == reliability::ReliabilityEventType::PACKET_DROP     ? "PACKET_DROP"
+      : evt.type == reliability::ReliabilityEventType::DUPLICATE_DROPPED ? "DUPLICATE_DROPPED"
+                                                                           : "PACKET_RECEIVED";
+  logger::debug("[RELIABILITY-EVENT] %s source=%s seq=%u neighbor=%s attempt=%u", typeStr, nodeName(evt.source),
+                static_cast<unsigned>(evt.sequence), nodeName(evt.neighbor), static_cast<unsigned>(evt.attemptCount));
+}
+
 // Registers ESP-NOW peers for this node's direct topology neighbors (see
 // neighborsOf() in core/node_id.h), skipping any whose MAC hasn't been
 // filled in yet. Real MACs don't exist until hardware is flashed — see
@@ -112,7 +132,7 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 3 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 4 firmware");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
@@ -139,9 +159,10 @@ void setup() {
   anomaly::init();
   anomaly::setEventCallback(onAnomalyEvent);
   reliability::init();
+  reliability::setEventCallback(onReliabilityEvent);
   telemetry::init();
 
-  logger::info("Phase 3 firmware ready - entering main loop");
+  logger::info("Phase 4 firmware ready - entering main loop");
 }
 
 void loop() {
@@ -155,6 +176,7 @@ void loop() {
   routing::tick();
   predictor::tick();
   anomaly::tick();
+  reliability::tick();
 
   if (now - g_lastSensorSample >= SENSOR_SAMPLE_INTERVAL_MS) {
     g_lastSensorSample = now;

@@ -125,19 +125,24 @@ vocabularies don't match 1:1 (`WARMUP`/`INVALID` vs. `SUSPECT`/
 automatic.
 
 **Fields with no firmware source at all yet:** `firmwareVersion` (no
-versioning scheme exists in this project), `bootId`, the entire
-`STATISTICS` message (depends on the not-yet-built reliability/counters
-layer), `ERROR`'s `code`/`recoverable` taxonomy (no firmware error-code
-system exists), and `ROUTE_UPDATE`'s per-route `score` and 8-value
-`routeReason` enum (routing_core tracks hop-count and validity, not a
-score, and `RouteEventType` only has 3 coarse values).
+versioning scheme exists in this project), `bootId`, `ERROR`'s
+`code`/`recoverable` taxonomy (no firmware error-code system exists), and
+`ROUTE_UPDATE`'s per-route `score` and 8-value `routeReason` enum
+(routing_core tracks hop-count and validity, not a score, and
+`RouteEventType` only has 3 coarse values). **Update (Phase 4):** the
+`STATISTICS` message's underlying counters now exist for real —
+`reliability::getStatistics()` (`packetsSent`/`packetsDelivered`/
+`packetsFailed`/`retries`/`duplicatesDropped`/`acknowledgements`/
+`lastLatencyMs`) — but are not yet serialized over JSON, and reflect only
+local per-hop traffic (no automatic traffic generator exists yet — see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
 
 **What would resolve this:** a wire-serialization phase (JSON envelope
 construction + per-message-type field mapping, most naturally the
-`telemetry/` module once the reliability layer's counters exist to feed
-`STATISTICS`) — not yet scheduled; do not implement it without explicit
-go-ahead, and do not silently redesign firmware enums/structs to match the
-GUI's vocabulary without documenting the mapping decision in
+`telemetry/` module now that the reliability layer's counters exist to
+feed `STATISTICS`) — not yet scheduled; do not implement it without
+explicit go-ahead, and do not silently redesign firmware enums/structs to
+match the GUI's vocabulary without documenting the mapping decision in
 `docs/decisions.md` first.
 
 ## Phase 3 anomaly engine — OLED wiring deliberately deferred
@@ -179,6 +184,39 @@ the real thing:
 
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
 this file.
+
+## Phase 4 reliability layer — not yet run on hardware, and no live application traffic yet even in principle
+
+Everything in `src/reliability/` (packet identity, unicast send, ACK,
+bounded retry, timeout, duplicate filter, forwarding, PDR wiring) is
+verified two ways: a host-compiled, actually-executed unit test suite
+(`firmware/PredictiveMesh/test/test_reliability_core.cpp` — 88/88 checks,
+see `docs/testing.md`) and a real `arduino-cli` compile of the whole
+sketch (including, for the first time in this project, real
+`esp_now_send()` calls for genuine unicast traffic). Neither is a
+substitute for the real thing — and this phase has an extra gap beyond
+"no hardware exists yet": **no real application traffic exists to
+generate even in principle**, since `reliability::send()` has no automatic
+caller (see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+
+- [ ] Two real boards exchange a genuine unicast `MSG_DATA`/`MSG_ACK` pair
+- [ ] A real dropped frame (e.g. Faraday-bag attenuation, per the guide's
+      own §06 demo) actually triggers a real retry, observed on the Serial
+      monitor
+- [ ] `RELIABILITY_ACK_TIMEOUT_MS` (currently a placeholder, 200ms) is
+      tuned against real hardware round-trip timing
+- [ ] Real multi-hop forwarding (e.g. A -> C -> D -> S) delivers correctly
+      end-to-end
+- [ ] `predictor`'s PDR reflects real, observed per-hop delivery ratios —
+      not just the wired-but-unexercised mechanism
+- [ ] A real application data source is decided and wired to
+      `reliability::send()` (a real design decision, not a hardware test —
+      but nothing above can be observed on hardware until one exists)
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file (except the last item, which additionally needs a real design
+decision this phase deliberately did not make — see decisions.md).
 
 ## Phase 1 routing — not yet run on hardware
 

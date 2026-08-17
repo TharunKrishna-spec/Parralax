@@ -8,7 +8,7 @@
 enum MessageType : uint8_t {
   MSG_HEARTBEAT = 0,  // periodic liveness / link-quality probe between direct neighbors
   MSG_DATA      = 1,  // application payload (sensor reading, anomaly flag, ...). May carry priority=1.
-  MSG_ACK       = 2,  // hop-by-hop delivery acknowledgement (§5.4) — reliability layer, not yet implemented
+  MSG_ACK       = 2,  // hop-by-hop delivery acknowledgement (§5.4) — reliability layer, Phase 4
 };
 
 inline const char* messageTypeName(MessageType type) {

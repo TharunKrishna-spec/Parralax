@@ -1,7 +1,7 @@
 # Architecture
 
-Status: **Phase 3 — transport + routing + predictor + anomaly real,
-reliability/telemetry still stubs.** This document describes what exists
+Status: **Phase 4 — transport + routing + predictor + anomaly + reliability
+real, telemetry still a stub.** This document describes what exists
 now and the shape it's built to grow into. It does not describe algorithms
 that aren't implemented yet — see [known-issues.md](known-issues.md) for
 those.
@@ -53,9 +53,9 @@ Bottom to top, matching implementation-guide.html §01:
 | Layer | State | Lives in |
 |---|---|---|
 | Transport (ESP-NOW) | **Implemented** (Phase 0) | `src/transport/` |
-| Reliability (ACK, retransmit, dup-filter) | Stub interface only | `src/reliability/` |
+| Reliability (hop-by-hop ACK, bounded retry, dup-filter, forwarding) | **Implemented** (Phase 4) | `src/reliability/` |
 | Routing (distance-vector + priority override + link-health-aware selection) | **Implemented** (Phase 1, extended Phase 2) | `src/routing/` |
-| Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2) | `src/predictor/` |
+| Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | Reporting (OLED + Serial/WebSerial) | Stub interface only | `src/telemetry/` |
 
@@ -71,8 +71,12 @@ same `(pkt, rssi)` to both `routing::onPacketReceived()` and
 `predictor::onPacketReceived()`. Routing then closes the loop by *reading*
 predictor's per-neighbor health via `predictor::isUnhealthy()` when
 choosing a NORMAL next hop (see "Routing + predictor integration (Phase
-2)" below). Reliability/anomaly/telemetry remain clean call-through stubs
-for later phases.
+2)" below). Phase 4 adds reliability as a third peer consumer of the same
+`(pkt, rssi)` (`reliability::onPacketReceived()`), and closes a different
+loop: reliability *writes into* the predictor via `predictor::onSendResult()`
+whenever a real hop-transmission's outcome (ACK'd or timed-out) becomes
+known — see "Reliability layer (Phase 4)" below. Telemetry remains a clean
+call-through stub for a later phase.
 
 ## Firmware layout and why it's structured this way
 
@@ -100,14 +104,17 @@ firmware/PredictiveMesh/
     ├── anomaly/
     │   ├── anomaly_core.h/.cpp   <- pure median/MAD/modified-Z/flatline/state-machine algorithm, no Arduino dependency
     │   └── anomaly.h/.cpp        <- Arduino-facing adapter (analogRead/millis/logger)
-    ├── reliability/   <- stub
+    ├── reliability/
+    │   ├── reliability_core.h/.cpp   <- pure packet-identity/dup-filter/retry/timeout/statistics algorithm, no Arduino dependency
+    │   └── reliability.h/.cpp        <- Arduino-facing adapter (MeshPacket construction/parsing, transport::send, millis/logger)
     └── telemetry/     <- stub
 
 firmware/PredictiveMesh/test/
-├── test_routing_core.cpp     <- host-compiled (g++) unit tests for routing_core
-├── test_predictor_core.cpp   <- host-compiled (g++) unit tests for predictor_core
-└── test_anomaly_core.cpp     <- host-compiled (g++) unit tests for anomaly_core
-                                  see docs/testing.md for all three
+├── test_routing_core.cpp      <- host-compiled (g++) unit tests for routing_core
+├── test_predictor_core.cpp    <- host-compiled (g++) unit tests for predictor_core
+├── test_anomaly_core.cpp      <- host-compiled (g++) unit tests for anomaly_core
+└── test_reliability_core.cpp  <- host-compiled (g++) unit tests for reliability_core
+                                   see docs/testing.md for all four
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -153,7 +160,7 @@ has an OLED, its neighbor list — is looked up from that single value via
 [decisions.md](decisions.md) for why this was chosen over MAC-based
 auto-detection.
 
-## Packet flow (as of Phase 3)
+## Packet flow (as of Phase 4)
 
 1. `transport::begin()` brings up WiFi in station mode, fixes the channel,
    initializes ESP-NOW, and registers the recv/send callbacks.
@@ -165,8 +172,9 @@ auto-detection.
    **real** RSSI value read from `info->rx_ctrl->rssi`, then `main.cpp`'s
    `onTransportRx()` `memcpy()`s it into a local `MeshPacket` (never
    pointer-casts the raw buffer — see `core/packet.h`) and hands it to
-   **both** `routing::onPacketReceived()` **and** `predictor::onPacketReceived()`
-   — the same parsed `(pkt, rssi)`, two independent consumers.
+   **all three** `routing::onPacketReceived()`, `predictor::onPacketReceived()`,
+   and `reliability::onPacketReceived()` — the same parsed `(pkt, rssi)`,
+   three independent consumers.
 4. `routing::onPacketReceived()` always refreshes neighbor liveness for
    `pkt.prev_hop`; if the packet is `MSG_HEARTBEAT`, it also parses the
    payload as a distance-vector advertisement and folds it into the
@@ -176,15 +184,25 @@ auto-detection.
    recomputes `link_score`, and logs `[PREDICTOR] neighbor=... rssi_ewma=...
    slope=... pdr=... score=... health=...` — see "Routing + predictor
    integration (Phase 2)" below for what evidence feeds the score.
-6. `app::loop()` calls `routing::tick()` then `predictor::tick()` every
-   iteration. `routing::tick()` rate-limits itself: it sends this node's
-   own HELLO/route-advertisement beacon once per `ROUTING_HELLO_INTERVAL_MS`,
-   and sweeps for stale neighbor/route entries older than
-   `ROUTING_ENTRY_TIMEOUT_MS`. `predictor::tick()` independently sweeps
-   every direct neighbor for the staleness fast-path
+6. `reliability::onPacketReceived()` reacts only to `MSG_DATA`/`MSG_ACK`
+   (ignoring `MSG_HEARTBEAT`, routing's own concern): an `MSG_ACK` is
+   matched against a pending hop-transmission and, on a real match, fed
+   into `predictor::onSendResult(neighbor, true)`; an `MSG_DATA` packet is
+   always hop-ACKed back to its sender first, then checked against the
+   duplicate cache, then either delivered locally or forwarded via
+   `routing::selectNextHop()` — see "Reliability layer (Phase 4)" below.
+7. `app::loop()` calls `routing::tick()`, `predictor::tick()`, then
+   `reliability::tick()` every iteration. `routing::tick()` rate-limits
+   itself: it sends this node's own HELLO/route-advertisement beacon once
+   per `ROUTING_HELLO_INTERVAL_MS`, and sweeps for stale neighbor/route
+   entries older than `ROUTING_ENTRY_TIMEOUT_MS`. `predictor::tick()`
+   independently sweeps every direct neighbor for the staleness fast-path
    (`PREDICTOR_STALENESS_TIMEOUT_MS`, deliberately faster than routing's
-   own timeout — see [parameters.md](parameters.md)).
-7. Whenever something needs a next hop for a destination —
+   own timeout — see [parameters.md](parameters.md)). `reliability::tick()`
+   sweeps every pending hop-transmission for `RELIABILITY_ACK_TIMEOUT_MS`
+   expiry, resending or declaring final failure — each timed-out attempt
+   also feeds `predictor::onSendResult(neighbor, false)`.
+8. Whenever something needs a next hop for a destination —
    `routing::getNextHop(destination, priority)` or the packet-shaped
    wrapper `routing::selectNextHop(pkt)` — routing builds a per-neighbor
    health mask from `predictor::isUnhealthy()`, then picks the best
@@ -192,8 +210,11 @@ auto-detection.
    for NORMAL traffic only, preferring healthy candidates — see below),
    logs `[ROUTE] dst=... next=... hops=... priority=...`, and fires a
    `ROUTE_SELECTED` event to whatever's registered via
-   `routing::setEventCallback()`.
-8. Independently of any received packet, `app::loop()` samples both
+   `routing::setEventCallback()`. Both `reliability::send()` (self-
+   originated) and `reliability`'s own forwarding path (Part 7) call
+   through this exact same decision — reliability never re-derives a
+   routing choice itself.
+9. Independently of any received packet, `app::loop()` samples both
    sensors every `SENSOR_SAMPLE_INTERVAL_MS` — `anomaly::sample(POT)` then
    `anomaly::sample(LDR)`, each a real `analogRead()` fed through
    `anomaly_core::evaluate()`. `anomaly::tick()` also runs every iteration,
@@ -203,9 +224,9 @@ auto-detection.
    readings never touch `MeshPacket`, and mesh traffic never touches
    sensor state.
 
-See [protocol.md](protocol.md) for why no wire format changed in Phase 2
-or Phase 3, and [testing.md](testing.md) for how all three algorithms are
-validated without
+See [protocol.md](protocol.md) for why the wire format only grew real
+*use* of already-existing fields (Phase 4), not new bytes, and
+[testing.md](testing.md) for how all four algorithms are validated without
 hardware.
 
 ## Routing layer (Phase 1)
@@ -266,16 +287,22 @@ silence, bypassing the debounce entirely — see
 [parameters.md](parameters.md) for the full formula/threshold table and
 [decisions.md](decisions.md) for why each constant has the value it does.
 
-**PDR is real but not yet live-fed**: the math and API
-(`predictor::onSendResult()`) are complete and independently tested, but
-nothing in the current firmware calls it — every send this firmware
-performs today is a broadcast `MSG_HEARTBEAT` beacon, and ESP-NOW broadcast
-has no MAC-layer delivery ACK to measure, so there is no real per-neighbor
-unicast send outcome to observe yet. See
-[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2)
-for the full reasoning. Until then, PDR evidence sits at its documented
-neutral default (1.0) and `link_score` is driven by RSSI evidence + the
-staleness fast-path.
+**PDR is now real and wired, as of Phase 4** — `predictor::onSendResult()`
+is called for real by `reliability`'s own ACK/retry outcomes, per attempt
+(not per packet): `true` when a real `MSG_ACK` matches a pending hop-
+transmission, `false` for every individually-timed-out attempt. This
+resolves the Phase 2 measurement boundary
+([decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2))
+now that real unicast `MSG_DATA` traffic — with a real MAC-layer-independent
+application ACK — exists to measure. See
+[decisions.md](decisions.md#pdr-is-fed-per-attempt-not-per-packet--and-never-from-the-raw-esp-now-send-callback)
+for the exact attempt-vs-packet semantics and why the raw ESP-NOW send
+callback is never used as delivery evidence. **What's still true:** nothing
+in the current firmware automatically *calls* `reliability::send()` yet
+(see [decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)) —
+so on real hardware, PDR stays at its neutral default until something
+(a future phase, or a manual trigger) actually originates `MSG_DATA`
+traffic. The wiring is real; live traffic is not yet.
 
 **Routing + predictor integration**: `routing::getNextHop()` builds a
 `bool[NODE_ID_COUNT]` health mask from `predictor::isUnhealthy()` and
@@ -351,6 +378,90 @@ and [known-issues.md](known-issues.md).
 reference to `routing_core`/`predictor_core` or vice versa — a sensor
 anomaly never affects a routing decision. See
 [decisions.md](decisions.md#sensor-health-and-networklink-health-are-separate-failure-domains--no-coupling-added).
+
+## Reliability layer (Phase 4)
+
+`src/reliability/` follows the same pure-core/adapter split as routing,
+predictor, and anomaly:
+
+- **`reliability_core.h`/`.cpp`** — the real algorithm: packet identity
+  (`PacketId{source, sequence}`), a fixed-size pending-hop-transmission
+  pool (`beginTx`/`cancelTx`/`onAckReceived`/`tickTimeouts`), a duplicate-
+  detection cache with TTL-based expiry and ring-buffer replacement
+  (`isDuplicateAndRecord`), and deterministic statistics counters. Zero
+  Arduino dependency, zero payload storage (a resend needs the original
+  bytes, which only the adapter owns — see
+  [decisions.md](decisions.md#reliability_core-split-out-as-an-arduino-free-pure-module-phase-4)).
+  This is what `firmware/PredictiveMesh/test/test_reliability_core.cpp`
+  compiles and runs directly with a host compiler.
+- **`reliability.h`/`.cpp`** — the thin Arduino-facing adapter. Owns the
+  one `ReliabilityState` instance plus a parallel array of raw
+  `MeshPacket` bytes for retransmission, constructs/parses `MSG_ACK`
+  packets, calls `transport::send()`/`millis()`/`logger::*`, and fires
+  `PACKET_TX`/`PACKET_ACK`/`PACKET_RETRY`/`PACKET_DELIVERED`/`PACKET_DROP`/
+  `DUPLICATE_DROPPED`/`PACKET_RECEIVED` events.
+
+**Packet identity (Part 1).** `(source, sequence)`, reusing `MeshPacket`'s
+own existing header fields — no new wire bytes. Preserved unchanged across
+every hop of a forward. Deliberately distinct from the GUI telemetry
+contract's own envelope `seq` (see
+[known-issues.md](known-issues.md) and
+[decisions.md](decisions.md#packet-identity-is-source-sequence-reusing-meshpackets-existing-header-fields--no-new-wire-format)).
+
+**Unicast (Part 2).** `reliability::send()` and the forwarding path both
+resolve a real peer MAC via `nodeInfo(neighbor).mac` and call
+`transport::send()` — never broadcast. MACs remain the Phase 0 all-zero
+placeholder until hardware exists; a send to an unregistered peer is
+rejected synchronously by `esp_now_send()`, which the adapter treats as an
+honest, immediate failure (`reliability_core::cancelTx()`), never a
+fabricated success.
+
+**ACK (Part 3).** `MSG_ACK` is a real, distinct wire message from the raw
+ESP-NOW `TxCallback` — the latter is never treated as delivery evidence
+(see the dedicated decisions.md entry). An ACK identifies which `(source,
+sequence)` `MSG_DATA` packet it acknowledges; ACK packets are themselves
+fire-and-forget, never acknowledged.
+
+**Retry/timeout (Parts 4/5).** `reliability_core::tickTimeouts()`, called
+every `reliability::tick()`, is a single non-blocking sweep over a small
+fixed array — never blocks the main loop. `RELIABILITY_MAX_RETRIES`/
+`RELIABILITY_ACK_TIMEOUT_MS` bound every hop-transmission to a deterministic
+worst-case time-to-failure (800ms — see [parameters.md](parameters.md)).
+
+**Duplicate filter (Part 6).** A TTL-expiring, ring-buffer-replaced cache
+of recently-seen `(source, sequence)` identities. Every received `MSG_DATA`
+is hop-ACKed *before* the duplicate check — the hop transmission itself
+succeeded regardless of whether the application has already seen this
+packet (see the dedicated decisions.md entry).
+
+**Forwarding (Part 7).** A packet not addressed to this node is forwarded
+via the exact same `routing::selectNextHop()` decision routing already
+makes for its own purposes — reliability never re-derives a routing
+choice. Loop prevention relies on `routing_core`'s proven correctness, a
+new `nextHop != prevHop` guard, and the duplicate filter as defense in
+depth — no new TTL/hop-count field (see the dedicated decisions.md entry,
+which supersedes Phase 1's original "not needed yet" TTL note).
+
+**PDR integration (Parts 8/9).** `predictor::onSendResult()` is fed per
+individual attempt, not per packet series — see the two dedicated
+decisions.md entries for the exact semantics and why PDR represents
+per-hop delivery only, never end-to-end. `reliability::send()` itself has
+no automatic caller yet in Phase 4 (see decisions.md) — the mechanism is
+real; live application traffic is a later phase's decision.
+
+**Events (Part 10) & statistics (Part 11).** One event enum/callback,
+matching the routing/predictor/anomaly convention exactly (plus
+`PACKET_RECEIVED`, added so a locally-delivered `MSG_DATA` packet has a
+real consequence rather than being dead code — see decisions.md).
+`reliability::getStatistics()` exposes a complete counter snapshot
+(`packetsSent`/`packetsDelivered`/`packetsFailed`/`retries`/
+`duplicatesDropped`/`acknowledgements`/`lastLatencyMs`) — not yet
+serialized over JSON, since the existing firmware telemetry architecture
+doesn't support that yet (`telemetry.cpp` is still the Phase 0 stub).
+
+**Routing interaction (Part 12).** `application -> routing::selectNextHop()
+-> reliability::send()/forwarding -> transport::send()`. Reliability reads
+routing's decision; it never writes to or bypasses it.
 
 ## Practical theory notes
 
