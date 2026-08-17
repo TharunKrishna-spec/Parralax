@@ -21,6 +21,18 @@ order" callout — wire the sensor, confirm `analogRead()`, then wire the
 OLED and confirm it responds), not the real mesh firmware; they will not be
 flashed as a node's final image.
 
+**Update (Phase 7, 2026-08-17): the board-label/node-ID question and the
+MAC table are RESOLVED.** The team confirmed physical board "E" is logical
+`NODE_C`, and provided the real MAC address for all five boards.
+`core/node_id.h`'s `nodeTable()` now carries them for real. The
+"⚠️ Board-label / node-ID mismatch" section, Part B items 11/12/26/27, and
+Part C's tables below are kept with their original PENDING/BLOCKED
+language struck through rather than deleted, so this document still shows
+its own audit trail — see
+[decisions.md](decisions.md#real-mac-address-table-populated-physical-board-e-confirmed-as-logical-node_c).
+Everything else this document flags (OLED contradiction, UART/RESET/BOOT
+pins, WiFi channel RF survey) remains genuinely open.
+
 ## Physical board inventory as reported
 
 | Label | SoC/module | Notes |
@@ -31,7 +43,7 @@ flashed as a node's final image.
 | S | ESP32-WROOM-32 | — |
 | E | classic ESP32 Dev Module | confirmed classic ESP32 SoC (not S2/S3/C3) |
 
-## ⚠️ Board-label / node-ID mismatch — NEEDS TEAM INPUT, blocks the MAC table
+## ⚠️ Board-label / node-ID mismatch — RESOLVED Phase 7 (board "E" confirmed as `NODE_C`)
 
 The firmware topology (`core/node_id.h`), `implementation-guide.html` §01,
 and the **frozen** GUI contract (`nodeId` is one of `A`, `B`, `C`, `D`, `S`)
@@ -59,8 +71,10 @@ not a confirmed fact:
   variant meant to replace one of the other four, etc.) — that changes the
   MAC table below and needs to be confirmed before flashing.
 
-**Action needed:** confirm with the hardware teammate that board "E" is
-the board to flash as `NODE_C`, before filling in the MAC table below.
+~~**Action needed:** confirm with the hardware teammate that board "E" is
+the board to flash as `NODE_C`, before filling in the MAC table below.~~
+**Confirmed, Phase 7: board "E" is `NODE_C`.** The MAC table below is now
+filled in for real.
 
 ## Part B — hardware assumption audit
 
@@ -75,9 +89,9 @@ the board to flash as `NODE_C`, before filling in the MAC table below.
 | 7 | ESP-NOW channel | READY (mechanism) / NEEDS TEAM INPUT (value) | Single `MESH_WIFI_CHANNEL` (config.h, `=6`) referenced everywhere needed (`esp_wifi_set_channel()`, every `addPeer()` call). Still a placeholder value (`known-issues.md`) — pick based on local WiFi congestion at the actual flash/demo site. |
 | 8 | Wi-Fi mode | READY | Station mode only, no AP — matches the guide, no change needed. |
 | 9 | ESP-NOW initialization | READY | `esp_now_init()` + real callback registration, verified compiling against core 3.3.11 since Phase 1. |
-| 10 | Peer registration | READY (mechanism) / BLOCKED (real MACs) | `registerConfiguredPeers()` already skips the all-zero sentinel MAC and logs a warning — see Part D below. |
-| 11 | MAC address mapping | BLOCKED — needs real MACs from teammate | See Part D. |
-| 12 | Node ID mapping | NEEDS TEAM INPUT | See the board-label mismatch above. |
+| 10 | Peer registration | READY | Real MACs now populated (Phase 7) — `registerConfiguredPeers()` registers a real unicast peer for every neighbor; its all-zero-sentinel skip/warn path is unchanged but no longer triggers. See Part D below. |
+| 11 | MAC address mapping | READY — real MACs provided (Phase 7) | See Part D. |
+| 12 | Node ID mapping | READY — board "E" confirmed as `NODE_C` (Phase 7) | See the board-label mismatch above. |
 | 13 | Maximum node count | READY | `NODE_ID_COUNT = 5`, matches the 5-board inventory exactly (once the E/C question above is resolved). |
 | 14 | Routing node IDs | READY | `core/node_id.h`'s fixed topology (A/B/C/D/S) is unchanged since Phase 0; no redesign needed. |
 | 15 | Sensor GPIO assumptions | READY | GPIO34 (pot, ADC1_CH6), GPIO35 (LDR, ADC1_CH7) — both ADC1-only pins, correctly avoiding the documented ADC2-dies-after-WiFi trap. |
@@ -91,8 +105,8 @@ the board to flash as `NODE_C`, before filling in the MAC table below.
 | 23 | UART logging | READY | Structured `[INFO]`/`[RX]`/`[TX]`/etc. logger output, unchanged; now interleaved with the new newline-delimited JSON telemetry lines on the same Serial stream (both are just `Serial.print*` calls — no separate UART used, matching the contract's own transport section). |
 | 24 | Memory usage (RAM) | READY | 48,536 bytes (14%) with the new telemetry module, `ENABLE_UCB1=0` — comfortable headroom (279,144 bytes free). |
 | 25 | Flash usage | READY | 914,988 bytes (69%) — comfortable headroom (395,732 bytes free). |
-| 26 | Placeholder hardware values | NEEDS TEAM INPUT | `MESH_WIFI_CHANNEL` (6) and the all-zero peer MAC table remain placeholders — both by design, both waiting on real-world input (RF survey / teammate's MAC list), not a code defect. |
-| 27 | All-zero MAC placeholders | BLOCKED — needs real MACs | Still present in `core/node_id.h`'s `NODE_TABLE`; `registerConfiguredPeers()` already handles this gracefully (skip + warn), so it is not a compile/runtime hazard, only a "no real unicast peers yet" limitation. |
+| 26 | Placeholder hardware values | PARTIALLY RESOLVED (Phase 7) | The MAC table is now real (Phase 7). `MESH_WIFI_CHANNEL` (6) remains a placeholder, still waiting on a real-world RF-congestion survey at the flash/demo site — not a code defect. |
+| 27 | All-zero MAC placeholders | RESOLVED (Phase 7) | `core/node_id.h`'s `nodeTable()` now carries five real, team-confirmed MAC addresses — no node's `mac[]` is all-zero any longer. `registerConfiguredPeers()`'s skip/warn path is unchanged but no longer exercised for any of the current five nodes. |
 | 28 | Simulation-only code accidentally enabled | NO CHANGE — confirmed clean | Grepped for any simulation/mock/fake data path in `firmware/PredictiveMesh/src/` — none exists; the GUI's own `serial-mock.py`/simulation mode lives entirely in `gui-main/` and is never referenced by firmware. |
 | 29 | Mock data accidentally enabled | NO CHANGE — confirmed clean | Same check as above — no firmware code path fabricates a sensor reading, RSSI value, or delivery outcome; every telemetry field this phase added is sourced from real `*_core` state or explicitly omitted when unavailable (see gui-compatibility-matrix.md). |
 | 30 | `ENABLE_UCB1` default | NO CHANGE — confirmed | Still `0` (disabled) — reconfirmed via `grep` after both real compiles this phase; restored build is byte-identical to the pre-toggle build (914,988/48,536 both times). |
@@ -110,11 +124,11 @@ before this phase and remains true.
 
 | NODE_ID | Node name | MAC address | Wi-Fi channel | Role | Node-specific GPIO |
 |---|---|---|---|---|---|
-| `NODE_A` | A | **PENDING** — awaiting teammate's mapping | 6 (`MESH_WIFI_CHANNEL`) | source | none (no OLED) |
-| `NODE_B` | B | **PENDING** | 6 | relay (primary path) | none (no OLED) |
-| `NODE_C` | C | **PENDING** — physical board likely "E", needs confirmation (see above) | 6 | relay (alternate path) | OLED (GPIO21/22, `0x3C`) |
-| `NODE_D` | D | **PENDING** | 6 | relay (alternate path) | none (no OLED) |
-| `NODE_S` | S | **PENDING** | 6 | sink/root | OLED (GPIO21/22, `0x3C`) |
+| `NODE_A` | A | `C0:CD:D6:CF:B9:B4` (real, Phase 7) | 6 (`MESH_WIFI_CHANNEL`) | source | none (no OLED) |
+| `NODE_B` | B | `88:57:21:E0:89:48` (real, Phase 7) | 6 | relay (primary path) | none (no OLED) |
+| `NODE_C` | C | `F4:65:0B:48:EE:AC` (real, Phase 7 — physical board "E", confirmed) | 6 | relay (alternate path) | OLED (GPIO21/22, `0x3C`) |
+| `NODE_D` | D | `C0:CD:D6:8D:B7:08` (real, Phase 7) | 6 | relay (alternate path) | none (no OLED) |
+| `NODE_S` | S | `C0:CD:D6:CF:62:98` (real, Phase 7) | 6 | sink/root | OLED (GPIO21/22, `0x3C`) |
 
 Every row shares: `SERIAL_BAUD_RATE=115200`, `PIN_SENSOR_POT=GPIO34`,
 `PIN_SENSOR_LDR=GPIO35`, `PIN_BUZZER=GPIO25` (all five boards wire
@@ -125,13 +139,13 @@ identically per implementation-guide.html §03's own device table).
 Every field below is traced to a hardware file, firmware config, the
 guide, or marked `UNKNOWN — TEAM INPUT REQUIRED`. Nothing is invented.
 
-| Field | A | B | D | S | E (likely C — unconfirmed) |
+| Field | A | B | D | S | E / `NODE_C` (confirmed, Phase 7) |
 |---|---|---|---|---|---|
-| Logical `NODE_ID` | `NODE_A` | `NODE_B` | `NODE_D` | `NODE_S` | `NODE_C` — **unconfirmed, see above** |
+| Logical `NODE_ID` | `NODE_A` | `NODE_B` | `NODE_D` | `NODE_S` | `NODE_C` — **confirmed, Phase 7** |
 | Board/module | ESP32-WROOM-32 (reported) | ESP32-WROOM-32 (reported) | ESP32-WROOM-32 (reported) | ESP32-WROOM-32 (reported) | classic ESP32 Dev Module (reported) |
 | ESP32 SoC | classic ESP32 (implied by WROOM-32) | classic ESP32 (implied) | classic ESP32 (implied) | classic ESP32 (implied) | classic ESP32, explicitly confirmed by the team |
-| MAC address source | teammate's mapping (not yet provided) | same | same | same | same |
-| MAC address | **PENDING** | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
+| MAC address source | teammate's mapping (Phase 7, real) | same | same | same | same |
+| MAC address | `C0:CD:D6:CF:B9:B4` | `88:57:21:E0:89:48` | `C0:CD:D6:8D:B7:08` | `C0:CD:D6:CF:62:98` | `F4:65:0B:48:EE:AC` |
 | Wi-Fi channel | 6 (`MESH_WIFI_CHANNEL`, config.h — placeholder) | 6 | 6 | 6 | 6 |
 | Wi-Fi mode | `WIFI_STA` (`transport::begin()`) | same | same | same | same |
 | ESP-NOW role | source | relay (primary path) | relay (alternate path) | sink/root | relay (alternate path) |
@@ -146,8 +160,8 @@ guide, or marked `UNKNOWN — TEAM INPUT REQUIRED`. Nothing is invented.
 | RESET/EN | UNKNOWN — TEAM INPUT REQUIRED | same | same | same | same |
 | BOOT | UNKNOWN — TEAM INPUT REQUIRED | same | same | same | same |
 | Serial baud | 115200 | 115200 | 115200 | 115200 | 115200 |
-| Firmware config | `THIS_NODE_ID NODE_A` | `THIS_NODE_ID NODE_B` | `THIS_NODE_ID NODE_D` | `THIS_NODE_ID NODE_S` | `THIS_NODE_ID NODE_C` — pending E/C confirmation |
-| GUI identity (`nodeId`) | `"A"` | `"B"` | `"D"` | `"S"` | `"C"` — pending the same confirmation |
+| Firmware config | `THIS_NODE_ID NODE_A` | `THIS_NODE_ID NODE_B` | `THIS_NODE_ID NODE_D` | `THIS_NODE_ID NODE_S` | `THIS_NODE_ID NODE_C` |
+| GUI identity (`nodeId`) | `"A"` | `"B"` | `"D"` | `"S"` | `"C"` |
 
 See [system-map.md](system-map.md) for how this identity flows through
 every layer above the hardware, and
@@ -175,13 +189,16 @@ where the topology requires it (e.g. A's neighbor list includes B, and B's
 includes A) — every edge in implementation-guide.html §01's diagram is
 present in both directions.
 
-**Do not fabricate MAC addresses.** None were invented this phase; the
-sentinel remains all-zero pending the teammate's real mapping. **Fill-in
-procedure is unchanged from the one already documented in
-[known-issues.md](known-issues.md#peer-mac-addresses-are-placeholders)** —
-flash, read each board's own logged MAC over Serial at boot
-(`[INFO] Own MAC address: ...`), record it against its resolved `NODE_ID`
-(see Part C's board-label caveat first), update `NODE_TABLE`, reflash.
+**Do not fabricate MAC addresses.** None were invented this phase (Phase
+6) or the next (Phase 7) — the sentinel remained all-zero until the
+teammate provided the real mapping directly, which `core/node_id.h`'s
+`nodeTable()` now carries verbatim (see
+[decisions.md](decisions.md#real-mac-address-table-populated-physical-board-e-confirmed-as-logical-node_c)).
+The fill-in procedure this section originally documented (flash, read each
+board's own logged MAC over Serial at boot, record, update, reflash) was
+not needed in the end — the real mapping was provided directly rather than
+harvested per-board — but remains accurate as a fallback procedure for any
+future board (e.g. a spare, or a re-flash after a hardware swap).
 
 ## Part E — Wi-Fi channel
 
@@ -314,29 +331,28 @@ size/controller is actually going on S and C (one type or two), and (2)
 whether the 0.96" sketch's `0x78` address needs fixing to `0x3C` before
 that sketch is used as a real bench test.
 
-## Part F — application traffic
+## Part F — application traffic — RESOLVED Phase 7
 
-Searched implementation-guide.html and this repository for a defined
-`MSG_DATA` application-payload format or a specified traffic
-generator/schedule. **None exists.** The guide's own wording — `MessageType`'s
-comment "application payload (sensor reading, anomaly flag, ...)" — is
-illustrative, not a specification (no field layout, no rate, no trigger
-condition given anywhere, including §5.4's reliability section and §07's
-testing/demo sections).
+At the time this audit was written (Phase 6), implementation-guide.html
+and this repository were searched for a defined `MSG_DATA`
+application-payload format or a specified traffic generator/schedule, and
+**none existed** — the guide's own wording, `MessageType`'s comment
+"application payload (sensor reading, anomaly flag, ...)," was
+illustrative, not a specification. That gap was reported rather than
+filled with an invented protocol, per this project's standing rule.
 
-**Per this phase's explicit instruction not to invent application
-semantics or fabricate periodic traffic:** this remains an **explicit,
-documented integration gap**, unchanged and inherited directly from Phases
-4/5 (see
-[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)) —
-`reliability::send()` still has no automatic caller. This does **not**
-block telemetry (Parts H-N): every telemetry message type this phase
-implemented is sourced from state that's real and populated independently
-of whether any `MSG_DATA` traffic ever flows — routing's table (from the
-already-automatic HELLO beacon exchange), predictor's link scores (from the
-same beacons' RSSI), anomaly's sensor state (from real, already-automatic
-`analogRead()` sampling), and reliability's statistics (which simply stay
-at their honest neutral defaults, exactly as documented, until this gap is
-resolved). `STATISTICS.pdr` reports `1.0` (neutral default) and all packet
-counters report `0` until real `MSG_DATA` traffic exists — this is a
-correct, honest reading of "no traffic has flowed yet," not a bug.
+**Phase 7 update:** this session provided the missing specification
+directly — `NODE_A -> NODE_S`, a small binary payload built from real
+POT/LDR readings, and a deterministic priority trigger. `src/apptraffic/`
+now implements it and calls `reliability::send()` for real; see
+[decisions.md](decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s)
+and [phase-log.md](phase-log.md)'s Phase 7 entry. This was **not** guessed
+or invented — the original gap analysis above is kept as the historical
+record of why nothing was built here before an explicit specification
+existed.
+
+Once flashed to real hardware, `STATISTICS.pdr`/packet counters,
+`predictor`'s live PDR, and (if `ENABLE_UCB1=1`) UCB1's bandit tables will
+accumulate real values instead of their honest neutral defaults — none of
+that has actually run on hardware yet (see
+[known-issues.md](known-issues.md)'s Phase 7 section).

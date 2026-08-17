@@ -174,8 +174,8 @@ every node's real sensor data is sent and stored regardless.
 | `anomaly::SENSOR_ANOMALY` | `SENSOR_ANOMALY` | real |
 | `anomaly::SENSOR_FLATLINE` / `SENSOR_STALE` / `SENSOR_INVALID` | `SENSOR_FAILURE` (with `details.reason` distinguishing which) | real, coarsened — contract has one failure enum value for three distinct firmware conditions |
 | `anomaly::SENSOR_RECOVERED` | *(none)* | same reasoning as `LINK_RECOVERED` |
-| `reliability::PACKET_RETRY` | `PACKET_RETRY` | real (currently dormant — no live `MSG_DATA` traffic exists, see Part F) |
-| `reliability::PACKET_DROP` | `PACKET_DROP` | real (dormant, same reason) |
+| `reliability::PACKET_RETRY` | `PACKET_RETRY` | real (dormant until flashed to hardware — the code-level "no live `MSG_DATA` traffic" gap is resolved as of Phase 7's `src/apptraffic/`, see decisions.md; will fire on a real retried hop-transmission once running on real boards) |
+| `reliability::PACKET_DROP` | `PACKET_DROP` | real (same — dormant only until flashed, not blocked on any remaining code gap) |
 | `reliability::PACKET_TX/ACK/DELIVERED/RECEIVED/DUPLICATE_DROPPED` | *(none)* | not anomalies — already covered in aggregate by the periodic `STATISTICS` message, matching the contract's own EVENT-vs-STATISTICS division of concerns |
 | *(none in firmware)* | `NODE_JOIN` / `NODE_LEAVE` | **no firmware source exists** — routing tracks neighbor liveness but fires no discrete "first contact" / "now gone" event distinct from ordinary beacon traffic; not fabricated, flagged as a real gap |
 
@@ -193,8 +193,11 @@ every node's real sensor data is sent and stored regardless.
 | `endToEndLatencyMs` | `Statistics.lastLatencyMs` | **misleadingly named in the contract for this firmware** — this is the last *per-hop* ACK latency, not a true multi-hop end-to-end measurement (no such mechanism exists); reported under the contract's field name since it's the closest and only real latency figure available, documented here rather than silently passed off as something it isn't |
 
 Emitted every `TELEMETRY_STATISTICS_INTERVAL_MS` (1000ms) — matches
-exactly. All counters currently read `0`/`1.0` on a fresh boot because no
-live `MSG_DATA` traffic exists yet (Part F) — an honest reading, not a bug.
+exactly. All counters still read `0`/`1.0` on a fresh boot, and will until
+flashed to real hardware — but the underlying "no live `MSG_DATA` traffic"
+gap this note originally described is resolved at the code level as of
+Phase 7 (`src/apptraffic/`, `NODE_A -> NODE_S` — see decisions.md); once
+running on real boards these counters will move.
 
 ## `0x0A ERROR`
 

@@ -20,11 +20,16 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 6 complete** (2026-08-17) — pre-flash hardware readiness audit +
-real firmware<->GUI JSON telemetry (`src/telemetry/`), on top of the Phase
-0-5 firmware foundation. See [`docs/phase-log.md`](docs/phase-log.md) for
-the full record. **Physical hardware now exists (5 boards) but nothing has
-been flashed yet** — see [`docs/hardware-readiness.md`](docs/hardware-readiness.md).
+**Phase 7 complete** (2026-08-17) — real application traffic
+(`src/apptraffic/`: `NODE_A` -> `NODE_S`, real POT/LDR payload,
+Serial-triggered priority packet), on top of the Phase 0-6 firmware
+foundation (routing/predictor/anomaly/reliability/UCB1/telemetry). See
+[`docs/phase-log.md`](docs/phase-log.md) for the full record. The real
+MAC address table is now populated (`core/node_id.h`), and the physical
+board previously labeled "E" is confirmed as logical `NODE_C` — both
+provided by the team this phase. **Physical hardware exists (5 boards,
+real MACs known) but nothing has been flashed yet** — see
+[`docs/hardware-readiness.md`](docs/hardware-readiness.md).
 
 A **GUI implementation exists in this repository**, under
 [`gui-main/`](gui-main/) — a teammate's, not this session's. Its own
@@ -69,26 +74,35 @@ replaces — NORMAL-traffic candidates routing already validated, learning
 from real Phase 4 delivery outcomes (one trial per resolved hop-
 transmission series, never per retry), with link-health preference and
 loop-prevention both preserved and priority traffic structurally untouched
-(Phase 5). Routing, predictor, anomaly, reliability, and UCB1 all keep the
+(Phase 5); real firmware<->GUI JSON telemetry — all 10 contract message
+types, `bootId`/envelope `seq` distinct from `MeshPacket.sequence`, rate
+limiting per `TELEMETRY_*_INTERVAL_MS`, validated by running real
+firmware-generated JSON through the GUI's own unmodified parsing code
+(Phase 6); and now real application traffic — `NODE_A` periodically sends
+its own POT/LDR readings to `NODE_S` via `reliability::send()` (never a
+raw `transport::send()`), NORMAL traffic routed by the existing
+link-health-aware selection, PRIORITY traffic on a one-shot Serial `'p'`
+trigger forcing the direct `A->S` hop (Phase 7). Routing, predictor,
+anomaly, reliability, UCB1, telemetry, and apptraffic all keep the
 Arduino-free-core / thin-adapter split (`src/routing/`, `src/predictor/`,
-`src/anomaly/`, `src/reliability/`, `src/ucb1/`, each `*_core.h/.cpp` +
-adapter `.h/.cpp`), each unit-tested with a host-compiled g++ harness —
-28/28 (routing), 31/31 (predictor), 50/50 (anomaly), 88/88 (reliability),
-26/26 (ucb1) — **223/223 total**, see `docs/testing.md`. As of Phase 5,
-the **whole Phase 0+1+2+3+4+5 sketch has been compiled for real in BOTH
-`ENABLE_UCB1=0` and `ENABLE_UCB1=1` configurations** against the installed
-`esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings, both
-times. The repository's committed default is `ENABLE_UCB1=0`.
+`src/anomaly/`, `src/reliability/`, `src/ucb1/`, `src/telemetry/`,
+`src/apptraffic/`, each `*_core.h/.cpp` + adapter `.h/.cpp`), each
+unit-tested with a host-compiled g++ harness — 28/28 (routing), 31/31
+(predictor), 50/50 (anomaly), 88/88 (reliability), 26/26 (ucb1), 94/94
+(telemetry), 29/29 (apptraffic) — **346/346 total**, see `docs/testing.md`.
+The **whole sketch has been compiled for real in BOTH `ENABLE_UCB1=0` and
+`ENABLE_UCB1=1` configurations** against the installed `esp32:esp32` core
+3.3.11 (`arduino-cli`) — 0 errors, 0 warnings, both times, most recently
+this phase (915,080 / 917,228 bytes flash). The repository's committed
+default is `ENABLE_UCB1=0`.
 
-Nothing left in `src/` is a stub interface — telemetry is real as of this
-phase. What's still not built: any automatic caller of
-`reliability::send()` (the mechanism is real and tested, but no real
-application data source was invented — see `docs/decisions.md`) — this
-also means UCB1's bandit tables have nothing to learn from yet even when
-enabled, and `STATISTICS`'s telemetry counters stay at their honest
-neutral defaults, since the reward/counter signal comes entirely from
-`reliability::send()`'s outcomes; OLED wiring for the anomaly flags (Node
-C — deferred, same reasoning as Phase 0's original OLED deferral).
+Nothing left in `src/` is a stub interface. The one gap every phase since
+Phase 4 documented — `reliability::send()` had no automatic caller — is
+now resolved (`src/apptraffic/`); UCB1's bandit tables (when enabled) and
+`STATISTICS`'s telemetry counters will accumulate real data once flashed,
+instead of staying at their honest neutral defaults. What's still not
+built: OLED wiring for the anomaly flags (Node C — deferred, same
+reasoning as Phase 0's original OLED deferral).
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
@@ -112,29 +126,28 @@ exist but none are flashed. See `docs/known-issues.md` and
 flashing** — do not start anything unprompted. Phase 0-4 covers
 implementation-guide.html §06's "required, not stretch" roadmap through
 Hours 17-23; Phase 5 is that roadmap's only named stretch feature (Hours
-23-28); Phase 6 is the software-only prerequisite for the guide's next
+23-28); Phase 6-7 are the software-only prerequisites for the guide's next
 roadmap block (Hours 28-32, "Live demo staging & stress testing," which
 also requires physical hardware rehearsal this phase deliberately did not
-attempt). Candidates for what comes next (none started, none scoped):
-physical flashing (blocked on the teammate's real MAC mapping and the
-board-label/node-ID question — see `docs/hardware-readiness.md`), deciding
-what real `MSG_DATA` application traffic should flow (resolving the shared
-Phase 4/5/6 "no live caller/no live data" gap), and OLED wiring (deferred
-since Phase 0).
+attempt). The two blockers Phase 7 needed team input for — the real MAC
+mapping and the board-label/`NODE_C` question — are now resolved. Remaining
+candidates for what comes next (none started, none scoped): physical
+flashing (now unblocked on the software side; still needs the team's
+answers on OLED controller/size and UART/RESET/BOOT pin confirmation — see
+`docs/hardware-readiness.md`), and OLED wiring (deferred since Phase 0).
 
 Things worth rereading before starting whatever's next:
-- [`docs/hardware-readiness.md`](docs/hardware-readiness.md) — the
-  physical board inventory (A/B/D/S/E) doesn't match the required logical
-  node set (A/B/C/D/S); confirm with the hardware teammate which physical
-  board plays the `NODE_C` role before filling in any MAC address or
-  flashing anything.
-- [`docs/decisions.md`](docs/decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented) —
-  the reliability mechanism (ACK/retry/duplicate-filter/forwarding/PDR
-  wiring) is real and tested, but nothing calls `reliability::send()`
-  automatically yet; deciding what real application data a node should
-  send, to whom, and how often is a real, undecided design question — not
-  something to invent unprompted. UCB1 (Phase 5) and telemetry's
-  `STATISTICS` message (Phase 6) both inherit this exact same gap.
+- [`docs/hardware-readiness.md`](docs/hardware-readiness.md) — the real
+  MAC table and `NODE_C`=board-"E" confirmation are filled in (Phase 7),
+  but the OLED controller/size contradiction (SSD1306 vs SH1106) and the
+  0.96" bench sketch's likely `0x78`/`0x3C` address bug are still open team
+  questions, and UART/RESET/BOOT pins still need confirming against the
+  physical boards before flashing.
+- [`docs/decisions.md`](docs/decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s) —
+  `reliability::send()` now has a real caller (`src/apptraffic/`, `NODE_A
+  -> NODE_S`) as of Phase 7; UCB1's bandit tables and telemetry's
+  `STATISTICS` message will both accumulate real data once flashed,
+  purely as a consequence — no code change was needed in either.
 - **`ENABLE_UCB1` must stay `0` (disabled) unless explicitly asked
   otherwise** — it's a stretch feature the guide itself only wants enabled
   "if ahead of schedule," and every UCB1-touching code path was built to

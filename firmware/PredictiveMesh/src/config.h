@@ -340,6 +340,25 @@
 #define TELEMETRY_OFFLINE_TIMEOUT_MS (3 * TELEMETRY_HEARTBEAT_INTERVAL_MS)
 
 // ============================================================
+// APPLICATION TRAFFIC (Phase 7 — demo workload for reliability::send())
+// ============================================================
+// Periodic interval between application DATA packets NODE_A sends to
+// NODE_S. No numeric value is given by implementation-guide.html or any
+// existing spec (see docs/decisions.md — this whole module resolves a gap
+// Phase 4 explicitly declined to guess at) - a starting/placeholder
+// figure, chosen deliberately relative to timing this project has already
+// established rather than picked arbitrarily: comfortably above one
+// hop-transmission's own worst-case retry window
+// ((1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS = 800ms), so
+// in the common case a new send never overlaps the previous series' own
+// retries; well under a level that would compete for airtime with
+// ROUTING_HELLO_INTERVAL_MS's (1000ms) beacon traffic every single cycle;
+// and still frequent enough to give PREDICTOR_PDR_EWMA_ALPHA's ~20-sample
+// window, and the GUI's STATISTICS panel, real, visibly-moving numbers
+// over a multi-minute demo. See docs/decisions.md.
+#define APPLICATION_TX_INTERVAL_MS 2000
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

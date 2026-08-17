@@ -12,12 +12,14 @@ hardware genuinely didn't exist, is now superseded by
 audit, but is kept here as the running checklist of what's still
 unvalidated.
 
-**Flagged, unresolved: physical board "E" doesn't match any logical node
-name.** Firmware/guide/GUI all require exactly A/B/C/D/S; the physical
-inventory has no "C" and an unexplained "E". See
-[hardware-readiness.md](hardware-readiness.md)'s board-label section and
-[decisions.md](decisions.md#board-labelnode-id-mismatch-flagged-not-silently-resolved-phase-6) —
-needs team confirmation before the MAC table can be filled in.
+**RESOLVED as of Phase 7 (2026-08-17): physical board "E" is confirmed to
+be logical `NODE_C`.** The team-confirmed answer to the board-label
+question this section originally flagged as unresolved. `core/node_id.h`'s
+`nodeTable()` now carries the real, team-confirmed MAC address table (see
+[decisions.md](decisions.md#real-mac-address-table-populated-physical-board-e-confirmed-as-logical-node_c)) —
+the original board-label-mismatch entry below is kept as the historical
+record of why the question was flagged rather than silently assumed, per
+[decisions.md](decisions.md#board-labelnode-id-mismatch-flagged-not-silently-resolved-phase-6).
 
 ## Two new, real findings from the hardware team's own bring-up sketches (`hardware code/`)
 
@@ -227,7 +229,7 @@ the real thing:
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
 this file.
 
-## Phase 4 reliability layer — not yet run on hardware, and no live application traffic yet even in principle
+## Phase 4 reliability layer — not yet run on hardware (the "no live application traffic" gap is RESOLVED as of Phase 7)
 
 Everything in `src/reliability/` (packet identity, unicast send, ACK,
 bounded retry, timeout, duplicate filter, forwarding, PDR wiring) is
@@ -236,13 +238,21 @@ verified two ways: a host-compiled, actually-executed unit test suite
 see `docs/testing.md`) and a real `arduino-cli` compile of the whole
 sketch (including, for the first time in this project, real
 `esp_now_send()` calls for genuine unicast traffic). Neither is a
-substitute for the real thing — and this phase has an extra gap beyond
-"no hardware exists yet": **no real application traffic exists to
-generate even in principle**, since `reliability::send()` has no automatic
-caller (see
-[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+substitute for the real thing.
+
+**Update, Phase 7:** the extra gap this section originally flagged beyond
+"no hardware exists yet" — **no real application traffic existed to
+generate even in principle**, since `reliability::send()` had no automatic
+caller — is now resolved at the code level: `src/apptraffic/` calls
+`reliability::send()` for real (`NODE_A -> NODE_S`, see
+[decisions.md](decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s)).
+The original entry is kept below as the historical record of why the gap
+existed; every item below remains genuinely `NOT RUN` until real hardware
+exists to run it on.
 
 - [ ] Two real boards exchange a genuine unicast `MSG_DATA`/`MSG_ACK` pair
+      (mechanism real since Phase 4, live caller real since Phase 7 — still
+      needs actual hardware)
 - [ ] A real dropped frame (e.g. Faraday-bag attenuation, per the guide's
       own §06 demo) actually triggers a real retry, observed on the Serial
       monitor
@@ -252,15 +262,15 @@ caller (see
       end-to-end
 - [ ] `predictor`'s PDR reflects real, observed per-hop delivery ratios —
       not just the wired-but-unexercised mechanism
-- [ ] A real application data source is decided and wired to
-      `reliability::send()` (a real design decision, not a hardware test —
-      but nothing above can be observed on hardware until one exists)
+- [x] ~~A real application data source is decided and wired to
+      `reliability::send()`~~ — **done, Phase 7** (`src/apptraffic/`,
+      `NODE_A -> NODE_S`). Observing its real hardware behavior remains
+      `NOT RUN`, tracked by the items above.
 
-All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
-this file (except the last item, which additionally needs a real design
-decision this phase deliberately did not make — see decisions.md).
+All remaining items `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist
+at the top of this file.
 
-## Phase 5 UCB1 adaptive routing — not yet run on hardware, and inherits Phase 4's "no live traffic" gap directly
+## Phase 5 UCB1 adaptive routing — not yet run on hardware (inherited "no live traffic" gap is RESOLVED as of Phase 7)
 
 `src/ucb1/` (bandit statistics, UCB1 selection formula, health-tiering,
 loop-guard exclusion) is verified two ways: a host-compiled,
@@ -268,17 +278,21 @@ actually-executed unit test suite
 (`firmware/PredictiveMesh/test/test_ucb1_core.cpp` — 26/26 checks, see
 `docs/testing.md`) and a real `arduino-cli` compile of the whole sketch in
 **both** `ENABLE_UCB1=0` and `ENABLE_UCB1=1` configurations. Neither is a
-substitute for the real thing — and this phase inherits Phase 4's gap
-directly and unavoidably: **UCB1's reward signal comes entirely from
-`reliability::send()`'s outcomes, and nothing calls that automatically
-yet** (see
-[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
-Even with `ENABLE_UCB1=1` flashed to real boards, the bandit tables would
-stay empty — there is no real delivery history for UCB1 to learn from
-until that gap is resolved.
+substitute for the real thing.
 
-- [ ] `ENABLE_UCB1=1` flashed to real boards, with a real application
-      traffic source (still undecided — see above) actually generating
+**Update, Phase 7:** the gap this section inherited directly from Phase 4
+— UCB1's reward signal comes entirely from `reliability::send()`'s
+outcomes, and nothing called that automatically — is resolved the same
+way: `src/apptraffic/` is now that caller, and (per
+[decisions.md](decisions.md#ucb1pdr-outcome-wiring-required-no-code-changes-in-reliabilitycpp-routingcpp-or-ucb1cpp--verified-not-re-implemented))
+required zero changes to `ucb1.cpp`/`ucb1_core.cpp` themselves — the
+outcome-feeding call sites already existed, gated behind `#if
+ENABLE_UCB1`, and simply had no real events flowing through them yet. With
+`ENABLE_UCB1=1` flashed to real boards running real `apptraffic` traffic,
+the bandit tables will now have real delivery history to learn from.
+
+- [ ] `ENABLE_UCB1=1` flashed to real boards, with real `apptraffic`
+      traffic (`NODE_A -> NODE_S`, resolved Phase 7) actually generating
       delivery outcomes
 - [ ] A real preference shift is observed — e.g. after a route's real
       delivery rate degrades (a Faraday-bag attenuation on a specific
@@ -293,10 +307,8 @@ until that gap is resolved.
       [decisions.md](decisions.md#forwarding-loop-prevention-relies-on-routing_core-correctness--a-next-hop-not-prev-hop-guard--the-duplicate-filter--no-new-ttl-field))
 
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
-this file (the first item additionally needs the same real design
-decision — a real application traffic source — Phase 4 already flagged as
-undecided; nothing UCB1-specific above can be observed until that exists
-either).
+this file — real hardware is now the only remaining blocker for every item
+above.
 
 ## Phase 6 telemetry — not yet run on hardware
 
@@ -323,10 +335,38 @@ a substitute for the real thing:
       timing
 
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
-this file (the second item additionally needs the "no live MSG_DATA
-traffic" gap from Phase 4 resolved before `STATISTICS`'s counters would
-show anything but their neutral defaults — see
-[hardware-readiness.md](hardware-readiness.md)'s Part F).
+this file. The second item's original caveat — needing the "no live
+`MSG_DATA` traffic" gap resolved before `STATISTICS`'s counters would show
+anything but their neutral defaults — is resolved at the code level as of
+Phase 7 (`src/apptraffic/`, see
+[hardware-readiness.md](hardware-readiness.md)'s Part F and
+[decisions.md](decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s));
+real hardware is still required to actually observe non-default counters.
+
+## Phase 7 application traffic — not yet run on hardware
+
+`src/apptraffic/` (send-decision logic, payload encode/decode, the Serial
+priority trigger) is verified two ways: a host-compiled,
+actually-executed unit test suite
+(`firmware/PredictiveMesh/test/test_apptraffic_core.cpp` — 29/29 checks,
+see `docs/testing.md`) and a real `arduino-cli` compile of the whole
+sketch in both `ENABLE_UCB1` configurations. Neither is a substitute for
+the real thing:
+
+- [ ] A real `NODE_A` sends a real `MSG_DATA` packet to `NODE_S` on real
+      hardware, observed as `[APPTRAFFIC] TX ...` on the Serial monitor
+- [ ] `APPLICATION_TX_INTERVAL_MS` (currently 2000ms, a placeholder) is
+      tuned against real hardware send/ACK/retry timing once observed
+- [ ] A real Serial `'p'`/`'P'` keypress on `NODE_A` produces a real
+      `PRIORITY` packet, observed taking the direct `A -> S` hop instead
+      of the NORMAL `A -> B -> S` path
+- [ ] Whether the GUI's own `serial-bridge.py` forwards keystrokes back to
+      the firmware (undetermined — not assumed either way, see
+      decisions.md) — if not, the priority trigger requires a direct
+      terminal connection to `NODE_A`, not just the GUI
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file.
 
 ## Phase 1 routing — not yet run on hardware
 

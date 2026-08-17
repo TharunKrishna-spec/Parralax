@@ -2403,3 +2403,272 @@ entries go at the bottom. Format:
 - **Impact:** Both new files are cross-referenced from
   `hardware-readiness.md`, `known-issues.md`, and `CLAUDE.md`.
 - **Phase/date:** Hardware bring-up audit, 2026-08-17.
+
+## Phase 7 — RESOLVED: reliability::send() now has a live automatic caller (NODE_A -> NODE_S)
+- **Decision:** `src/apptraffic/` (new module) periodically calls
+  `reliability::send()` from `NODE_A` toward `NODE_S`, resolving the gap
+  Phase 4 explicitly declined to guess at (see
+  [the original entry](#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented),
+  left unchanged below as the historical record of *why* the gap existed —
+  this entry documents its resolution, not a retraction).
+- **Reason:** This session provided the missing specification the Phase 4
+  entry said didn't exist anywhere: an explicit instruction naming
+  `NODE_A` as the primary source, `NODE_S` as the destination, and a
+  payload shape to build from. With a real spec in hand, the original
+  objection ("inventing one now would be exactly the kind of fabricated
+  protocol/schedule this project's rule exists to prevent") no longer
+  applies — implementing it is now following a real requirement, not
+  guessing at one.
+- **Alternatives considered:** None at the destination/source level — both
+  were given explicitly. See the separate entries below for the traffic
+  rate, payload format, and priority-trigger decisions this phase still
+  had to make on its own within that spec.
+- **Impact:** `reliability_core::Statistics` (packetsSent/Delivered/Failed/
+  retries/acknowledgements/duplicatesDropped/lastLatencyMs), the
+  `STATISTICS` telemetry message, and — when `ENABLE_UCB1=1` — the UCB1
+  bandit tables will now accumulate real data once flashed to hardware,
+  instead of staying at their honest neutral defaults. Nothing about
+  `reliability_core`, `routing_core`, `predictor_core`, or `ucb1_core`
+  themselves changed — see "UCB1/PDR wiring required no code changes"
+  below.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## Application traffic flow: NODE_A -> NODE_S, reusing Phase 3's existing sensor reads, binary (not JSON) payload
+- **Decision:** The demo workload is a periodic application `MSG_DATA`
+  packet from `NODE_A` to `NODE_S`, carrying `NODE_A`'s own latest
+  POT/LDR readings. The payload is read via `anomaly::getTelemetry()`
+  (Phase 3's existing read-only accessor over its own already-running
+  `SENSOR_SAMPLE_INTERVAL_MS`-cadence sampling) rather than a second,
+  independent `analogRead()` call site. The payload is a small
+  `#pragma pack(push,1)` binary struct (`apptraffic_core::DataWire`, 10
+  bytes: `appSeq:2, potValue:2, ldrValue:2, timestampMs:4`), not JSON.
+- **Reason:** `NODE_A`/`NODE_S` were given explicitly (source/sink roles
+  also match their `NodeRole` in `core/node_id.h` — `ROLE_SOURCE`/
+  `ROLE_SINK` — so this isn't even a new role assignment, just the first
+  code path to actually exercise the roles those enum values already
+  named). Reusing `anomaly::getTelemetry()` avoids a second sensor-sampling
+  code path duplicating Phase 3's calibration/staleness-aware logic for no
+  reason — the anomaly engine already owns "what is this sensor's latest
+  valid reading." Binary (not JSON) matches every other `MeshPacket`
+  payload in this project (`RouteAdWire`, `AckWire`) and this phase's own
+  explicit instruction — JSON stays telemetry's layer alone (Serial-out to
+  the GUI), never the ESP-NOW wire format.
+- **Alternatives considered:** (1) A fresh `analogRead()` inside
+  `apptraffic.cpp` at send time, for the freshest possible reading. (2)
+  Including a `valid`/health flag byte from `anomaly_core::SensorTelemetry`
+  in the wire payload.
+- **Why alternatives were rejected:** (1) would create two independent ADC
+  sampling code paths for the same two physical pins with no real benefit
+  — the existing `SENSOR_SAMPLE_INTERVAL_MS` (150ms) is far faster than
+  `APPLICATION_TX_INTERVAL_MS` (2000ms), so `anomaly::getTelemetry()`'s
+  snapshot is always fresh relative to the send cadence. (2) was left out
+  because nothing in the spec asked for it and the demo's application
+  payload's job is to exercise the reliability pipeline with real sensor
+  bytes, not to duplicate `SENSOR_STATUS` telemetry's own health reporting
+  — 10 bytes was kept deliberately minimal ("do NOT invent a large
+  protocol").
+- **Impact:** `apptraffic_core::DATA_WIRE_SIZE` (10) is far under
+  `PACKET_MAX_PAYLOAD` (64) — 54 bytes of headroom remains for anything a
+  future phase might need to add. See `docs/protocol.md`.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## DataWire (application payload wire struct) lives in apptraffic_core.cpp, not the Arduino adapter — a deliberate exception to the RouteAdWire/AckWire precedent
+- **Decision:** `routing.cpp`'s `RouteAdWire` and `reliability.cpp`'s
+  `AckWire` both live in their Arduino-facing adapter `.cpp` file, in an
+  anonymous namespace, never exposed to the `*_core` layer. `apptraffic`'s
+  equivalent (`DataWire`) instead lives inside `apptraffic_core.cpp`
+  (still anonymous-namespace-private, not exposed in `apptraffic_core.h`)
+  — encode/decode functions with plain typed parameters are what's
+  actually exported.
+- **Reason:** Phase 7's task spec explicitly requires host tests for
+  "sensor values encoded/decoded correctly," "payload size bounds," and
+  "no malformed packet construction" — that only makes sense if the
+  encode/decode logic itself is part of the Arduino-free, host-testable
+  core, not adapter glue. `apptraffic_core.h` still leaks zero wire-format
+  detail to its callers (same discipline as `reliability_core::PacketId`
+  being semantic, not wire bytes) — only `encodeData()`/`decodeData()`
+  taking/returning plain fields are public.
+- **Alternatives considered:** Keep `DataWire` in `apptraffic.cpp` (adapter
+  side, matching `RouteAdWire`/`AckWire` exactly) and test encode/decode
+  indirectly through the adapter instead.
+- **Why alternatives were rejected:** The adapter (`apptraffic.cpp`)
+  includes `<Arduino.h>` and calls `reliability::send()`/`Serial::*` — it
+  cannot be host-compiled at all, so any logic living only there is
+  permanently outside this project's host test suites, contradicting the
+  explicit test requirement above.
+- **Impact:** A structural, documented one-module exception to an
+  otherwise consistent codebase convention — noted here specifically so a
+  future reader doesn't "fix" it back to match `RouteAdWire`/`AckWire`
+  without realizing the placement was deliberate.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## Priority-traffic trigger: a single Serial character ('p'/'P') read on NODE_A, not a new command protocol
+- **Decision:** `apptraffic::tick()` drains `Serial.available()` on
+  `NODE_A` only, and calls `apptraffic_core::requestPriority()` on seeing
+  either `'p'` or `'P'`; every other byte (including a serial monitor's
+  trailing newline/carriage-return) is silently ignored. One recognized
+  keypress produces exactly one `PRIORITY` packet on the next
+  `APPLICATION_TX_INTERVAL_MS` tick (one-shot latch — see
+  `apptraffic_core::buildSendDecision()`), then reverts to `NORMAL`.
+- **Reason:** The task spec explicitly asked for "a simple and
+  deterministic" trigger and explicitly forbade inventing a complicated
+  command protocol "unless an existing command mechanism already exists."
+  This repository was searched (`main.cpp`, `logger.h`/`.cpp`,
+  `espnow_transport.*`) and **no existing inbound-Serial-command mechanism
+  exists anywhere** — every current use of `Serial` is output-only
+  (`logger::*`, `telemetry`'s `Serial.println()`). A single recognized
+  byte is the smallest possible thing that qualifies as "a command" at
+  all, requires zero new wiring (the same USB/Serial connection a demo
+  operator already has open per `docs/hardware-bringup.md`), and needs no
+  GUI change (nothing about `mesh-json/v1`'s frozen contract is inbound).
+- **Alternatives considered:** (1) A physical GPIO button on `NODE_A`. (2)
+  An automatic periodic priority packet (e.g. every Nth normal packet).
+  (3) A GUI-side "send priority" button forwarded through the serial
+  bridge.
+- **Why alternatives were rejected:** (1) requires new physical wiring on
+  a board that already exists and is not being touched this phase, and a
+  new `config.h` pin assignment with no basis in
+  implementation-guide.html's §03 pin table. (2) is deterministic but not
+  "controlled" in the sense the spec asked for — a live demo narrator
+  wants to trigger the priority packet at a specific dramatic moment
+  ("watch it skip straight to S"), not wait for an arbitrary counter to
+  roll over. (3) would require assuming `gui-main/`'s `serial-bridge.py`
+  forwards keystrokes bidirectionally, which was not verified (that script
+  is explicitly off-limits to inspect-and-modify this phase) — building a
+  firmware feature whose only real trigger path might not exist would be
+  the same kind of unverified assumption this project's rules forbid.
+- **Impact:** The priority trigger only works over a direct serial
+  terminal connected to `NODE_A` (Arduino IDE Serial Monitor, `screen`,
+  PuTTY, etc.) — not confirmed to work through the GUI's own serial bridge
+  unless that bridge is independently confirmed bidirectional (undecided,
+  not assumed either way). Documented in `docs/testing.md` and
+  `docs/protocol.md`.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## APPLICATION_TX_INTERVAL_MS = 2000ms
+- **Decision:** `NODE_A` sends one application `DATA` packet to `NODE_S`
+  every 2000ms (`config.h`).
+- **Reason:** No numeric value is given anywhere (guide or existing task
+  specs) — a starting/placeholder figure, deliberately derived from timing
+  this project already established rather than picked arbitrarily: (1)
+  comfortably above one hop-transmission's own worst-case retry window —
+  `(1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS` = `4 *
+  200ms` = 800ms — so in the common case a new send is never issued while
+  the previous series' retries are still resolving; (2) well under a rate
+  that would compete with `ROUTING_HELLO_INTERVAL_MS` (1000ms) beacon
+  traffic every single cycle, keeping the shared ESP-NOW channel and the
+  Serial/GUI log legible during a live demo; (3) frequent enough that
+  `PREDICTOR_PDR_EWMA_ALPHA`'s (0.1, ~20-sample-equivalent) window and the
+  GUI's `STATISTICS` panel show real, visibly-moving numbers within a
+  demo-length (a few minutes) window, not requiring an implausibly long
+  wait.
+- **Alternatives considered:** 500ms (faster PDR convergence); 5000ms
+  (minimal channel usage).
+- **Why alternatives were rejected:** 500ms risks a new send overlapping a
+  still-retrying previous series under real packet loss (500ms < 800ms
+  worst case), which would exercise `RELIABILITY_MAX_PENDING`'s pool-full
+  path more than intended for routine demo traffic (that path exists for
+  genuine congestion, not as the normal case). 5000ms would make a live
+  demo's PDR/statistics changes visibly sluggish to an audience.
+- **Impact:** A single `#define`, referenced only from `apptraffic.cpp` —
+  trivial to retune after real hardware round-trip-timing data exists
+  (same "placeholder, re-tune after real hardware" status as
+  `RELIABILITY_ACK_TIMEOUT_MS`/`ANOMALY_FLATLINE_EPS`).
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## Real MAC address table populated; physical board "E" confirmed as logical NODE_C
+- **Decision:** `core/node_id.h`'s `nodeTable()` now carries five real,
+  team-confirmed MAC addresses (previously all-zero placeholders). The
+  physical board this repository's hardware-readiness audit had
+  provisionally labeled "E" (an ESP32 Dev Module, distinct from the other
+  four ESP32-WROOM-32 boards) is confirmed by the team to be logical
+  `NODE_C` — resolving the open A/B/D/S-vs-A/B/C/D/S board-label question
+  `docs/hardware-readiness.md` and `docs/decisions.md` flagged rather than
+  silently assumed during the hardware-bring-up audit.
+- **Reason:** Both were explicit, direct instructions this session
+  (a full NodeID -> MAC table, and an explicit "E is NODE_C" statement) —
+  not inferred or guessed. This is exactly the missing team input the
+  prior audit's "Team inputs required" list named as blocking.
+- **Alternatives considered:** None — real values were provided directly;
+  there was nothing to infer or choose between.
+- **Impact:** `main.cpp`'s `registerConfiguredPeers()` (unchanged code)
+  will now register a real ESP-NOW ESPNOW peer for every direct neighbor
+  on every node, instead of skipping neighbors with an all-zero MAC (its
+  existing, already-correct skip-on-zero behavior simply no longer
+  triggers for any node). Two prior audit BLOCKED items
+  ("MAC mapping", "Node IDs") are resolved as of this phase — see the
+  end-of-report status in this session's chat transcript.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## THIS_NODE_ID == NODE_A checked at runtime, not via a preprocessor #if
+- **Decision:** `apptraffic::init()`/`tick()` gate their entire body with
+  a plain runtime `if (THIS_NODE_ID == NODE_A) { ... }` / `if
+  (THIS_NODE_ID != NODE_A) return;` — a normal C++ comparison the compiler
+  constant-folds and dead-code-eliminates (since `THIS_NODE_ID` is a
+  `#define` expanding to a compile-time-constant `NodeId` enumerator) —
+  never `#if THIS_NODE_ID == NODE_A`.
+- **Reason:** `NodeId`'s enumerators (`NODE_A`, `NODE_S`, ...) are C++
+  enum values, not preprocessor macros — the preprocessor cannot see them
+  at all. A `#if THIS_NODE_ID == NODE_A` conditional would silently
+  preprocess-expand to `#if NODE_S == NODE_A` (or whichever node), and
+  since **both** identifiers are unknown to the preprocessor, the
+  C-standard rule "unknown identifiers in `#if` evaluate to 0" would make
+  every node's build evaluate `0 == 0` — always true, regardless of which
+  node is actually selected. This was caught during design, before it
+  could ship as a real per-node behavior bug (every board would have
+  believed itself to be `NODE_A`), by tracing `THIS_NODE_ID`'s definition
+  in `config.h` back to `node_id.h`'s plain (non-macro) `enum NodeId`.
+- **Alternatives considered:** `#if THIS_NODE_ID == NODE_A` (the
+  bug described above); a second per-node `#define IS_SOURCE_NODE 0/1` in
+  `config.h`, set by hand alongside `THIS_NODE_ID`.
+- **Why alternatives were rejected:** The `#if` form is a latent
+  always-true bug, not a style choice. The second `#define` form works but
+  reintroduces exactly the kind of "two places must be kept in sync by
+  hand" risk `config.h`'s own header comment says `THIS_NODE_ID` was
+  designed to be "the ONLY line that differs between the five boards'
+  compiled images" — adding a second per-node line would violate that
+  documented invariant for no real benefit, since the plain runtime
+  comparison is just as correct and just as fully optimized away.
+- **Impact:** No behavior change risk for any other module — this pattern
+  (`nodeInfo(THIS_NODE_ID)`, `thisNode().hasOled`, etc.) was already used
+  everywhere else in this codebase; `apptraffic` is simply the first
+  module whose entire logic needs to be conditional on being a *specific*
+  node rather than just looking up its own node's data.
+- **Phase/date:** Phase 7, 2026-08-17.
+
+## UCB1/PDR outcome wiring required no code changes in reliability.cpp, routing.cpp, or ucb1.cpp — verified, not re-implemented
+- **Decision:** No changes were made to `src/reliability/reliability.cpp`,
+  `src/predictor/predictor.cpp`, `src/routing/routing.cpp`, or
+  `src/ucb1/ucb1.cpp`/`ucb1_core.cpp` this phase.
+- **Reason:** Phase 4 already wired `predictor::onSendResult(neighbor,
+  bool)` into every real ACK-match and timeout outcome
+  (`reliability.cpp`'s `handleAck()`/`tick()`), and Phase 5 already wired
+  `ucb1::onRouteOutcome(destination, nextHop, bool)` into the same
+  real-outcome call sites, gated behind `#if ENABLE_UCB1` — both were
+  verified by inspection (`reliability.cpp` lines around `handleAck()`,
+  `transmitHop()`, and the `TimeoutAction::FAILED` branch of `tick()`)
+  before writing a single line of `apptraffic` code. `reliability::send()`
+  routes every call, including `apptraffic`'s, through the exact same
+  `transmitHop()` path every other caller would use — there was never a
+  second, `apptraffic`-specific way for an outcome to reach `predictor`/
+  `ucb1`, so there was nothing left to wire.
+- **Alternatives considered:** None — this is a confirmation entry, not a
+  design choice. Recorded specifically because the task spec asked "how
+  is UCB1 now fed" as if it might require new plumbing, and the honest
+  answer is that it already existed and just had no real events flowing
+  through it yet.
+- **Impact:** `PREDICTOR`'s PDR and `UCB1`'s bandit tables will now
+  accumulate real per-hop delivery evidence once flashed, purely as a
+  consequence of `apptraffic` generating traffic that flows through
+  already-correct Phase 4/5 code — this is the entire point of the
+  "no live automatic caller" gap being about a missing *caller*, not a
+  missing *mechanism*. Per-hop PDR remains explicitly NOT the same as
+  end-to-end application delivery — see
+  [architecture.md](architecture.md#reliability-layer-phase-4)'s existing
+  "per-hop delivery only, never end-to-end" statement, unchanged and still
+  accurate; `apptraffic`'s own `appSeq` counter is a THIRD distinct
+  identity axis from both `MeshPacket.sequence` and the telemetry
+  envelope's `seq` (see `docs/protocol.md`) — nothing here lets an
+  observer reconstruct true end-to-end delivery confirmation from
+  per-hop ACKs alone.
+- **Phase/date:** Phase 7, 2026-08-17.

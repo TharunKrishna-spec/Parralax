@@ -34,11 +34,12 @@ struct NodeInfo {
   const char* name;
   bool hasOled;     // per §03 build checklist: only S and C carry a display
   bool hasBuzzer;   // per §03 pin table: every node wires the buzzer
-  uint8_t mac[6];   // ESP-NOW peer MAC. All-zero = not yet configured.
-                     // Hardware doesn't exist yet, so these start as a
-                     // placeholder sentinel — see docs/known-issues.md.
-                     // Fill in with the real MAC (each board logs its own
-                     // MAC over Serial at boot) once flashed.
+  uint8_t mac[6];   // ESP-NOW peer MAC. Real, team-confirmed addresses as
+                     // of Phase 7 (see docs/decisions.md) — the physical
+                     // board previously labeled "E" is confirmed to be
+                     // logical NODE_C, resolving the audit's open E/C
+                     // question. All-zero was the pre-hardware placeholder
+                     // sentinel; no node's mac[] is all-zero any longer.
 };
 
 inline const char* roleName(NodeRole role) {
@@ -55,12 +56,14 @@ inline const char* roleName(NodeRole role) {
 // of ODR violations across translation units. Safe in any C++ standard
 // since C++98; doesn't require C++17 inline variables.
 inline const NodeInfo* nodeTable() {
+  // Real, team-confirmed MAC addresses (Phase 7) — see docs/decisions.md.
+  // NODE_C's address is the physical board previously labeled "E".
   static const NodeInfo table[NODE_ID_COUNT] = {
-    { NODE_A, ROLE_SOURCE, "A", false, true, {0, 0, 0, 0, 0, 0} },
-    { NODE_B, ROLE_RELAY,  "B", false, true, {0, 0, 0, 0, 0, 0} },
-    { NODE_C, ROLE_RELAY,  "C", true,  true, {0, 0, 0, 0, 0, 0} },
-    { NODE_D, ROLE_RELAY,  "D", false, true, {0, 0, 0, 0, 0, 0} },
-    { NODE_S, ROLE_SINK,   "S", true,  true, {0, 0, 0, 0, 0, 0} },
+    { NODE_A, ROLE_SOURCE, "A", false, true, {0xC0, 0xCD, 0xD6, 0xCF, 0xB9, 0xB4} },
+    { NODE_B, ROLE_RELAY,  "B", false, true, {0x88, 0x57, 0x21, 0xE0, 0x89, 0x48} },
+    { NODE_C, ROLE_RELAY,  "C", true,  true, {0xF4, 0x65, 0x0B, 0x48, 0xEE, 0xAC} },
+    { NODE_D, ROLE_RELAY,  "D", false, true, {0xC0, 0xCD, 0xD6, 0x8D, 0xB7, 0x08} },
+    { NODE_S, ROLE_SINK,   "S", true,  true, {0xC0, 0xCD, 0xD6, 0xCF, 0x62, 0x98} },
   };
   return table;
 }

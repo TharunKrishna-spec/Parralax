@@ -1,13 +1,15 @@
 # Architecture
 
-Status: **Phase 6 — transport + routing + predictor + anomaly + reliability
-+ telemetry all real; UCB1 adaptive routing implemented as an optional,
-compile-time-gated stretch layer (disabled by default). Firmware now
-serializes the frozen firmware<->GUI JSON contract for real — nothing left
-in `src/` is a stub interface.** This document describes what exists now
-and the shape it's built to grow into. It does not describe algorithms
-that aren't implemented yet — see [known-issues.md](known-issues.md) for
-those.
+Status: **Phase 7 — transport + routing + predictor + anomaly +
+reliability + telemetry + application traffic all real; UCB1 adaptive
+routing implemented as an optional, compile-time-gated stretch layer
+(disabled by default). Firmware now serializes the frozen firmware<->GUI
+JSON contract for real, and `reliability::send()` finally has a live
+caller (`NODE_A` -> `NODE_S`) — nothing left in `src/` is a stub
+interface, and the "no live application traffic" gap open since Phase 4
+is resolved.** This document describes what exists now and the shape it's
+built to grow into. It does not describe algorithms that aren't
+implemented yet — see [known-issues.md](known-issues.md) for those.
 
 Source of truth for the *design* (topology, layer stack, algorithms) is
 [`implementation-guide.html`](../implementation-guide.html) at the repo root.
@@ -62,6 +64,7 @@ Bottom to top, matching implementation-guide.html §01:
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | UCB1 adaptive ranking (stretch, optional) | **Implemented, disabled by default** (Phase 5) | `src/ucb1/` |
 | Reporting (Serial/WebSerial JSON telemetry) | **Implemented** (Phase 6) — OLED still not wired | `src/telemetry/` |
+| Application traffic (demo workload calling `reliability::send()`) | **Implemented** (Phase 7) | `src/apptraffic/` |
 
 Data is meant to flow bottom-up: raw radio -> statistics -> routing
 decisions -> reliability -> reporting. Phase 0 wired the bottom layer for
@@ -85,7 +88,12 @@ registers its own transport/packet callback, instead reading routing's/
 predictor's/anomaly's/reliability's already-real state through their
 existing read-only accessors (plus one small new accessor each on
 `predictor`/`routing`) and their existing event-callback mechanism — see
-"Telemetry layer (Phase 6)" below.
+"Telemetry layer (Phase 6)" below. Phase 7 adds application traffic as the
+first real *caller* one level below telemetry: `src/apptraffic/` calls
+`reliability::send()` exactly the way any future application caller would
+— through the public API, never a raw `transport::send()` — so no
+existing layer needed to change to support it. See "Application traffic
+layer (Phase 7)" below.
 
 ## Firmware layout and why it's structured this way
 
@@ -119,9 +127,12 @@ firmware/PredictiveMesh/
     ├── ucb1/
     │   ├── ucb1_core.h/.cpp   <- pure bandit-statistics/UCB1-selection algorithm, no Arduino dependency, always compiled
     │   └── ucb1.h/.cpp        <- Arduino-facing adapter; .cpp body entirely `#if ENABLE_UCB1`-gated (config.h)
-    └── telemetry/
-        ├── telemetry_core.h/.cpp   <- pure JSON envelope/payload construction (mesh-json/v1), no Arduino dependency
-        └── telemetry.h/.cpp        <- Arduino-facing adapter (reads routing/predictor/anomaly/reliability state, Serial.println())
+    ├── telemetry/
+    │   ├── telemetry_core.h/.cpp   <- pure JSON envelope/payload construction (mesh-json/v1), no Arduino dependency
+    │   └── telemetry.h/.cpp        <- Arduino-facing adapter (reads routing/predictor/anomaly/reliability state, Serial.println())
+    └── apptraffic/
+        ├── apptraffic_core.h/.cpp   <- pure send-decision/payload-encode-decode logic, no Arduino dependency
+        └── apptraffic.h/.cpp        <- Arduino-facing adapter (millis/Serial-trigger/anomaly::getTelemetry()/reliability::send()); NODE_A only
 
 firmware/PredictiveMesh/test/
 ├── test_routing_core.cpp      <- host-compiled (g++) unit tests for routing_core (incl. Phase 5's enumerateCandidates)
@@ -129,8 +140,9 @@ firmware/PredictiveMesh/test/
 ├── test_anomaly_core.cpp      <- host-compiled (g++) unit tests for anomaly_core
 ├── test_reliability_core.cpp  <- host-compiled (g++) unit tests for reliability_core
 ├── test_ucb1_core.cpp         <- host-compiled (g++) unit tests for ucb1_core
-└── test_telemetry_core.cpp    <- host-compiled (g++) unit tests for telemetry_core
-                                   see docs/testing.md for all six
+├── test_telemetry_core.cpp    <- host-compiled (g++) unit tests for telemetry_core
+└── test_apptraffic_core.cpp   <- host-compiled (g++) unit tests for apptraffic_core
+                                   see docs/testing.md for all seven
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -176,7 +188,7 @@ has an OLED, its neighbor list — is looked up from that single value via
 [decisions.md](decisions.md) for why this was chosen over MAC-based
 auto-detection.
 
-## Packet flow (as of Phase 4)
+## Packet flow (as of Phase 7)
 
 1. `transport::begin()` brings up WiFi in station mode, fixes the channel,
    initializes ESP-NOW, and registers the recv/send callbacks.
@@ -239,7 +251,17 @@ auto-detection.
    completely disjoint from the packet-receive path above — sensor
    readings never touch `MeshPacket`, and mesh traffic never touches
    sensor state.
-10. `app::loop()`'s final call each iteration is `telemetry::tick()`, which
+10. `app::loop()` also calls `apptraffic::tick()` every iteration
+    (immediately after `reliability::tick()`, before `telemetry::tick()`).
+    On every node except `NODE_A` this is a no-op (a runtime, not
+    preprocessor, `THIS_NODE_ID` check — see decisions.md). On `NODE_A`, it
+    drains any pending Serial priority-trigger byte, and — rate-limited to
+    `APPLICATION_TX_INTERVAL_MS` — encodes its own latest
+    `anomaly::getTelemetry(POT)`/`(LDR)` readings into a 10-byte payload and
+    calls `reliability::send(NODE_S, payload, len, priority)`, exactly the
+    public API any other future application caller would use — see
+    "Application traffic layer (Phase 7)" below.
+11. `app::loop()`'s final call each iteration is `telemetry::tick()`, which
     rate-limits itself per `TELEMETRY_*_INTERVAL_MS` and reads real state
     from routing/predictor/anomaly/reliability to emit periodic
     HEARTBEAT/NODE_STATUS/LINK_UPDATE/PREDICTION/SENSOR_STATUS/STATISTICS
@@ -663,6 +685,70 @@ at boot until `transport::begin()` succeeds. See
 [gui-compatibility-matrix.md](gui-compatibility-matrix.md) for the complete
 field-by-field audit and [decisions.md](decisions.md) for the reasoning
 behind each.
+
+## Application traffic layer (Phase 7)
+
+`src/apptraffic/` resolves the gap every phase since Phase 4 has
+explicitly documented and declined to guess at:
+`reliability::send()` was real, tested, and fully wired — but nothing
+called it (see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)).
+Same pure-core/adapter split as every other layer:
+
+- **`apptraffic_core.h`/`.cpp`** — the pure send-decision and payload
+  encode/decode logic: `buildSendDecision()` (always addresses `NODE_S`,
+  consumes a one-shot priority latch), `nextAppSeq()` (a third,
+  independent sequence-counter axis — see [protocol.md](protocol.md)), and
+  `encodeData()`/`decodeData()` for the 10-byte binary wire payload. Zero
+  Arduino/ESP-NOW dependency — what
+  `firmware/PredictiveMesh/test/test_apptraffic_core.cpp` compiles and runs
+  directly with a host compiler. Unlike `routing.cpp`'s `RouteAdWire` /
+  `reliability.cpp`'s `AckWire`, the wire-format struct here lives inside
+  the `_core.cpp` file itself (still private, not exposed in the header) —
+  a deliberate, documented exception so encode/decode is itself
+  host-testable (see decisions.md).
+- **`apptraffic.h`/`.cpp`** — the thin Arduino-facing adapter. A no-op on
+  every node except `NODE_A` (checked at runtime — `#if THIS_NODE_ID ==
+  NODE_A` would be silently, always true regardless of node, since
+  `NodeId` enumerators aren't visible to the preprocessor; see
+  decisions.md). On `NODE_A`: drains `Serial` for the single-character
+  priority trigger, reads `anomaly::getTelemetry()`'s already-current
+  POT/LDR snapshot (no second `analogRead()` path), and calls
+  `reliability::send()` — never a raw `transport::send()` call, never a
+  second ACK/retry/PDR/routing implementation.
+
+**Layering.** `apptraffic` is a *consumer* of `reliability`, `routing`
+(indirectly, through `reliability::send()`), and `anomaly`
+(`getTelemetry()`) — it adds a new caller, not a new callee. None of
+`reliability_core`/`routing_core`/`predictor_core`/`ucb1_core` needed to
+change; `reliability.cpp`'s existing `handleAck()`/`tick()` code already
+fed every real outcome into `predictor::onSendResult()` and (when
+`ENABLE_UCB1=1`) `ucb1::onRouteOutcome()` — see decisions.md's
+"UCB1/PDR outcome wiring required no code changes" entry. `apptraffic`
+itself has zero awareness of telemetry, JSON, or the GUI, matching every
+other layer's discipline.
+
+**Traffic shape.** `NODE_A -> NODE_S`, `APPLICATION_TX_INTERVAL_MS`
+(2000ms) between packets, NORMAL by default (routed by
+`routing::selectNextHop()`'s existing link-health-aware selection — no
+hardcoded `A->B->S` anywhere in `apptraffic`), PRIORITY on a one-shot
+Serial trigger (routed by the existing structural priority override,
+§5.3, forcing the direct `A->S` hop). See
+[protocol.md](protocol.md#application-data-payload-phase-7-rides-inside-msg_data)
+for the exact wire layout and
+[decisions.md](decisions.md) for the traffic-rate/trigger-mechanism
+reasoning.
+
+**PDR distinction, unchanged and still accurate.** `apptraffic` generating
+real traffic does not change what PDR *means* — `reliability_core::Statistics`
+still measures per-hop delivery evidence (was this specific hop's ACK
+matched?), never true end-to-end application delivery. A multi-hop `A ->
+C -> D -> S` NORMAL packet now genuinely exercises three independent
+per-hop PDR observations (`A->C`, `C->D`, `D->S`), but nothing in this
+stack currently confirms or reports that the *application* payload itself
+reached `S` — see
+[architecture.md](architecture.md#reliability-layer-phase-4)'s existing
+"per-hop delivery only, never end-to-end" statement.
 
 ## Practical theory notes
 

@@ -656,3 +656,102 @@ Beyond flashing: OLED wiring (deferred since Phase 0), and resolving the
 application-traffic gap (`docs/hardware-readiness.md`'s Part F) — a real
 design decision about what `MSG_DATA` should actually carry, still not
 made. Do not start any of these without explicit instruction.
+
+## Phase 7 — Real application traffic (`NODE_A` -> `NODE_S`) + real MAC table + hardware bring-up audit follow-through
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for whatever comes next (including physical flashing).
+
+### Objective
+This session provided two concrete, previously-missing inputs the audit
+had flagged as blocking: an explicit application-traffic specification
+(`NODE_A` -> `NODE_S`, a small binary payload built from POT/LDR readings,
+a deterministic priority trigger) and the team's real, confirmed MAC
+address table (with the physical board previously labeled "E" confirmed
+as logical `NODE_C`). Objective: implement the minimum legitimate demo
+workload calling `reliability::send()` for real, without inventing
+anything beyond what was specified, without touching `gui-main/`, and
+without flashing hardware yet.
+
+### What was built
+- `src/apptraffic/apptraffic_core.h/.cpp` (new) — the pure algorithm,
+  Arduino-free (mirrors `routing_core`/`predictor_core`/`anomaly_core`/
+  `reliability_core`/`ucb1_core`/`telemetry_core`'s split):
+  `buildSendDecision()` (always addresses `NODE_S`, one-shot priority
+  latch), `nextAppSeq()` (a third, independent sequence-counter axis),
+  and `encodeData()`/`decodeData()` for a 10-byte binary payload
+  (`appSeq:2, potValue:2, ldrValue:2, timestampMs:4`) — with the wire
+  struct itself kept inside this file (a documented, deliberate exception
+  to the `RouteAdWire`/`AckWire` adapter-side precedent, so encode/decode
+  is host-testable).
+- `src/apptraffic/apptraffic.h/.cpp` (new) — the Arduino-facing adapter: a
+  no-op on every node except `NODE_A` (a runtime `THIS_NODE_ID` check, not
+  a preprocessor `#if` — see decisions.md), reads `anomaly::getTelemetry()`
+  for real POT/LDR values (no second `analogRead()` path), reads a single
+  Serial `'p'`/`'P'` byte as the priority trigger, and calls
+  `reliability::send()` — never `transport::send()` directly.
+- `src/config.h`: `APPLICATION_TX_INTERVAL_MS` (2000ms).
+- `src/core/node_id.h`: `nodeTable()`'s `mac[6]` fields populated with the
+  five real, team-confirmed addresses (previously all-zero placeholders).
+- `main.cpp`: `apptraffic::init()` added to `setup()`, `apptraffic::tick()`
+  added to `loop()` (between `reliability::tick()` and `telemetry::tick()`);
+  banners -> "Phase 7 firmware".
+- `firmware/PredictiveMesh/test/test_apptraffic_core.cpp` (new) — 29/29
+  checks across 14 test functions: send-decision/destination correctness,
+  priority-trigger one-shot behavior (including non-flooding under
+  repeated triggers), app-sequence counter increment/wraparound/
+  independence, and payload encode/decode round-tripping plus
+  malformed-input refusal.
+- Nine real, documented design decisions (traffic rate, payload format,
+  wire-struct placement, priority-trigger mechanism, the MAC-table
+  update/E-C resolution, the `THIS_NODE_ID` runtime-vs-preprocessor
+  pitfall, and an explicit confirmation that no `reliability`/`routing`/
+  `predictor`/`ucb1` code needed to change) — see `docs/decisions.md`.
+
+### What was explicitly NOT built (by design)
+Any flashing of physical hardware (still out of scope — see `CLAUDE.md`);
+OLED wiring (still deferred, unrelated to this phase); any change to
+`reliability_core`, `routing_core`, `predictor_core`, `ucb1_core`, or
+`telemetry_core`/`telemetry.cpp` (verified unnecessary, not skipped — see
+decisions.md); a second application destination/traffic pattern beyond
+`NODE_A -> NODE_S` (not requested); a new GUI telemetry message type or
+any `gui-main/` change (confirmed via `git diff --stat gui-main/`
+returning empty, both before and after); a GPIO-button or automatic
+periodic priority trigger (considered, rejected — see decisions.md); any
+change to `MESH_WIFI_CHANNEL` or OLED handling (outside this phase's
+given inputs).
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_apptraffic_core.cpp`: real,
+  host-compiled (g++ 15.2.0 / MinGW-W64), actually executed — 29/29
+  checks passed.
+- Full existing suite re-run alongside it to confirm no regressions:
+  `test_routing_core` 28/28, `test_predictor_core` 31/31,
+  `test_anomaly_core` 50/50, `test_reliability_core` 88/88,
+  `test_ucb1_core` 26/26, `test_telemetry_core` 94/94 — **346/346 total,
+  all seven host suites, actually run.**
+- **Real `arduino-cli compile` performed for BOTH configurations**:
+  `ENABLE_UCB1=0` (915,080 bytes flash / 48,536 bytes RAM) and
+  `ENABLE_UCB1=1` (917,228 bytes flash / 48,936 bytes RAM) — both clean on
+  the first attempt, 0 errors, 0 warnings (`--warnings all`). The
+  repository's committed state was restored to `ENABLE_UCB1=0` and
+  re-verified byte-identical to the first compile, confirming an exact
+  restore. See [testing.md](testing.md).
+- `git diff --stat -- gui-main/` confirmed empty both before and after
+  this phase's work.
+- No hardware-dependent validation — no boards flashed this phase (out of
+  scope by explicit instruction). See [known-issues.md](known-issues.md)
+  and [hardware-readiness.md](hardware-readiness.md).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review. `gui-main/` was not touched.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Physical flashing — the two inputs this phase resolved (real MACs, real
+application traffic) were the last software-side blockers this session's
+own audits had named; remaining blockers before flashing are OLED
+size/controller confirmation and the 0.96" sketch's `0x78`/`0x3C` address
+question (both team-input items, see `docs/hardware-readiness.md`), and
+UART/RESET/BOOT pin confirmation against the physical boards. OLED wiring
+itself remains deferred (unrelated to this phase). Do not start any of
+these without explicit instruction.

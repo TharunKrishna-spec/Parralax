@@ -2,7 +2,9 @@
 
 Status: **struct layout unchanged since Phase 0 — Phase 4 is the first
 phase to populate `sequence` for real and to actually construct/parse
-`MSG_ACK`, but adds zero new bytes to the frame.** `link_score` is a
+`MSG_ACK`, and Phase 7 is the first phase with a real, live `MSG_DATA`
+application payload flowing (`NODE_A` -> `NODE_S`, see below) — but adds
+zero new bytes to the `MeshPacket` frame itself in either case.** `link_score` is a
 purely local quantity — each node's own evaluation of its own direct radio
 links, consumed only by that same node's own routing decision. Anomaly
 flags are detected and logged locally, not yet transmitted anywhere. See
@@ -158,6 +160,57 @@ Beacons set `destination = NODE_ID_UNKNOWN` on the outer `MeshPacket`
 (reusing the same sentinel `packetInit()` already uses for "no next hop
 decided yet") to mean "addressed to all direct neighbors," not one
 specific node.
+
+## Application DATA payload (Phase 7, rides inside `MSG_DATA`)
+
+Phase 4 built the real hop-by-hop reliable-delivery mechanism
+(`reliability::send()`), but nothing called it — see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented).
+Phase 7 resolves that gap with the demo's minimum legitimate application
+workload: `NODE_A` periodically sends its own latest POT/LDR readings to
+`NODE_S`. Layout inside `MeshPacket.payload[]` (`apptraffic_core::DataWire`,
+`src/apptraffic/apptraffic_core.cpp`):
+
+```
+Offset  Size  Field         Notes
+0       2     appSeq        application-level packet counter (see below) — NOT MeshPacket.sequence
+2       2     potValue      raw ADC reading, 0-4095 (12-bit) — anomaly::getTelemetry(POT).raw_value
+4       2     ldrValue      raw ADC reading, 0-4095 (12-bit) — anomaly::getTelemetry(LDR).raw_value
+8       4     timestampMs   sender's millis() at encode time
+```
+
+10 bytes total (`apptraffic_core::DATA_WIRE_SIZE`), well under
+`PACKET_MAX_PAYLOAD` (64) — 54 bytes of headroom remains. Like
+`RouteAdWire`'s fields, every field here is read back via `memcpy()`
+(`apptraffic_core::decodeData()`), never a raw pointer cast — see this
+file's "Layout notes" at the top for why that matters on real Xtensa
+hardware. Sent via `reliability::send(NODE_S, payload, len, priority)` —
+never a raw `transport::send()` call — so it gets a real
+`MeshPacket.sequence`, hop-by-hop ACK, bounded retry, and duplicate
+filtering exactly like any other `MSG_DATA` traffic.
+
+**Three distinct, non-interchangeable sequence/counter concepts now exist
+in this stack — do not conflate any of them:**
+
+| Concept | Owner | Scope | Purpose |
+|---|---|---|---|
+| `MeshPacket.sequence` | `reliability_core::nextSequence()` | per-source, spans this packet's entire multi-hop lifetime | packet identity + duplicate filtering (Part 6, Phase 4) |
+| GUI telemetry envelope `seq` | `telemetry.cpp`'s `g_seq` | per-node, numbers every emitted JSON line | GUI sequence-gap/reconnect detection (Phase 6) |
+| `apptraffic` `appSeq` | `apptraffic_core::State.appSeqCounter` | `NODE_A`'s own application-packet count | a human/demo-readable "packet #N" counter inside the application payload itself — carried as ordinary payload bytes, invisible to routing/reliability |
+
+`appSeq` is transported *inside* the application payload precisely because
+it's an application-layer concept — `reliability_core` never reads it, and
+losing/reordering it would not affect delivery, ACKing, or duplicate
+detection, all of which key off `MeshPacket.sequence` alone.
+
+**Priority trigger:** `NODE_A` reads Serial input (`apptraffic.cpp`'s
+`drainPriorityTrigger()`) for a single recognized byte (`'p'`/`'P'`); on
+seeing one, the *next* application packet is sent with `priority=true`
+(`MeshPacket.priority = 1`), taking the existing structural priority
+override (§5.3) — never re-implemented, never routed differently by
+`apptraffic` itself. One keypress produces exactly one priority packet,
+then reverts to `NORMAL` — see
+[decisions.md](decisions.md#priority-traffic-trigger-a-single-serial-character-pp-read-on-node_a-not-a-new-command-protocol).
 
 ## What's deliberately NOT in this packet yet
 

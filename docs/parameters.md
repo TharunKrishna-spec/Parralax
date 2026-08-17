@@ -96,15 +96,25 @@ fallback").
 
 ## Peer MAC table
 
-`core/node_id.h`'s `NODE_TABLE` carries a `mac[6]` field per node,
-currently all-zero for every node. All-zero is a **sentinel meaning "not
-yet configured,"** not a real MAC — `registerConfiguredPeers()` in
-`main.cpp` checks for it and logs a warning instead of registering a
-unicast peer when it sees the sentinel. See
-[known-issues.md](known-issues.md) for the fill-in procedure once hardware
-exists, and
+`core/node_id.h`'s `nodeTable()` carries a `mac[6]` field per node — **real,
+team-confirmed addresses as of Phase 7** (previously all-zero placeholders;
+see [decisions.md](decisions.md#real-mac-address-table-populated-physical-board-e-confirmed-as-logical-node_c)):
+
+| Node | MAC |
+|---|---|
+| `NODE_A` | `C0:CD:D6:CF:B9:B4` |
+| `NODE_B` | `88:57:21:E0:89:48` |
+| `NODE_C` | `F4:65:0B:48:EE:AC` (the physical board previously labeled "E") |
+| `NODE_D` | `C0:CD:D6:8D:B7:08` |
+| `NODE_S` | `C0:CD:D6:CF:62:98` |
+
+`registerConfiguredPeers()` in `main.cpp` still checks for the all-zero
+sentinel and logs a warning instead of registering a unicast peer if it
+ever sees one again (e.g. a sixth node added later without a real MAC
+yet) — that guard is unchanged, it simply no longer triggers for any of
+the current five. See
 [decisions.md](decisions.md#broadcast-peer-as-the-phase-0-espnow-bootstrap)
-for why a broadcast peer is registered in the meantime.
+for why a broadcast peer is also registered.
 
 ## Anomaly (Phase 3)
 
@@ -173,10 +183,22 @@ mapping (link/prediction state classification, sensor health, route
 reason), the `ewmaAlpha`/`endToEndLatencyMs` field-naming caveats, and why
 `bootId` is a random nonce rather than a persistent counter.
 
+## Application traffic (Phase 7 — demo workload for `reliability::send()`)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `APPLICATION_TX_INTERVAL_MS` | `src/config.h` | `2000` ms | How often `NODE_A` sends one application `DATA` packet to `NODE_S`. Not guide-specified — chosen above the reliability layer's own worst-case retry window (`(1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS` = 800ms) and below a rate that would compete with `ROUTING_HELLO_INTERVAL_MS` (1000ms) every cycle. See [decisions.md](decisions.md#application_tx_interval_ms--2000ms). |
+| `apptraffic_core::DATA_WIRE_SIZE` | `src/apptraffic/apptraffic_core.h` | `10` bytes | Fixed wire size of one application `DATA` payload (`appSeq:2, potValue:2, ldrValue:2, timestampMs:4`). Well under `PACKET_MAX_PAYLOAD` (64). See [protocol.md](protocol.md#application-data-payload-phase-7-rides-inside-msg_data). |
+
+Priority trigger (a single Serial `'p'`/`'P'` byte read on `NODE_A`) has no
+numeric parameter — see
+[decisions.md](decisions.md#priority-traffic-trigger-a-single-serial-character-pp-read-on-node_a-not-a-new-command-protocol).
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-Nothing remains in this category as of Phase 6 — the predictor's timing
+Nothing remains in this category as of Phase 7 — the predictor's timing
 parameters were wired in Phase 2, the anomaly engine's in Phase 3, the
-reliability layer's in Phase 4, UCB1's in Phase 5, and telemetry's in Phase
-6 (see the tables above). This section is kept as a placeholder heading for
-whatever a future phase introduces next.
+reliability layer's in Phase 4, UCB1's in Phase 5, telemetry's in Phase 6,
+and application traffic's in Phase 7 (see the tables above). This section
+is kept as a placeholder heading for whatever a future phase introduces
+next.

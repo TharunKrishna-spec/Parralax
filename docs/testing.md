@@ -1,8 +1,79 @@
 # Testing
 
-No physical hardware exists yet, so nothing in this document claims a
+Physical hardware exists (5 boards, real MACs known as of Phase 7) but
+nothing has been flashed yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
+
+## Phase 7 — application traffic (`NODE_A` -> `NODE_S`), actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs)
+
+### 1. Host tests (`apptraffic_core`'s send-decision + payload encode/decode logic)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/apptraffic/apptraffic_core.cpp test_apptraffic_core.cpp -o test_apptraffic_core
+(clean compile, zero warnings)
+$ ./test_apptraffic_core
+... (29 checks, see below)
+29/29 checks passed
+EXIT_CODE=0
+```
+
+14 test functions: normal-decision construction and destination fixed at
+`NODE_S`; the priority trigger producing exactly one `PRIORITY` decision
+(one-shot, and not flooded by repeated `requestPriority()` calls before
+consumption); the app-sequence counter's increment and 65536 wraparound
+behavior, and its independence from the priority latch; payload
+encode/decode round-tripping every field exactly (including the full
+`uint32_t` timestamp range and 12-bit ADC extremes 0/4095); payload-size
+bounds (`DATA_WIRE_SIZE` = 10 comfortably under `PACKET_MAX_PAYLOAD` = 64);
+and malformed-construction refusal (undersized buffers, short payloads,
+null pointers all refused without a partial write/read).
+
+Re-ran the full existing suite alongside this one to confirm nothing
+regressed: `test_routing_core` 28/28, `test_predictor_core` 31/31,
+`test_anomaly_core` 50/50, `test_reliability_core` 88/88, `test_ucb1_core`
+26/26, `test_telemetry_core` 94/94, `test_apptraffic_core` 29/29 —
+**346/346 total, all seven host suites, actually run.**
+
+**What this is not:** no real Serial output, no real `reliability::send()`
+call, no real sensor read — every input is a hand-constructed plain value.
+`apptraffic.cpp` (the Arduino-facing adapter — real `millis()`, real
+`Serial` read, real `anomaly::getTelemetry()`, real `reliability::send()`)
+is untested by this harness, same caveat as every prior phase's adapter
+half — reviewed by hand, validated by the real ESP32 compile below.
+
+### 2. Real ESP32 compilation — BOTH `ENABLE_UCB1` configurations (matching Phase 5/6's own precedent)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=0 (default)
+Sketch uses 915080 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48536 bytes (14%) of dynamic memory, leaving 279144 bytes for local variables. Maximum is 327680 bytes.
+```
+
+```
+# config.h temporarily edited to ENABLE_UCB1=1
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=1
+Sketch uses 917228 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48936 bytes (14%) of dynamic memory, leaving 278744 bytes for local variables. Maximum is 327680 bytes.
+# config.h restored to ENABLE_UCB1=0 (required default) and re-verified — identical
+# byte counts to the first compile above (915080/48536), confirming an exact restore.
+```
+
+**Both configurations compiled clean on the first attempt — 0 errors, 0
+warnings, `esp32:esp32` core 3.3.11.** Flash grew by 92 bytes over Phase
+6's own `ENABLE_UCB1=0` figure (914988 -> 915080) — the new `apptraffic`
+module plus five real (non-zero) MAC addresses replacing the all-zero
+placeholder table; RAM is unchanged (48536 bytes both phases), since
+`apptraffic_core::State` is a handful of scalar fields with no new
+fixed-size array.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (all 7 suites) | **verified** — 346/346, see above |
+| ESP32 COMPILATION, `ENABLE_UCB1=0` (default) | **verified** — clean, 0 warnings, 0 errors |
+| ESP32 COMPILATION, `ENABLE_UCB1=1` | **verified** — clean, 0 warnings, 0 errors |
+| GUI (`gui-main/`) | **untouched** — `git diff --stat gui-main/` empty before and after (no new telemetry message type, no contract change — application traffic is an ESP-NOW-only binary payload, invisible to the GUI except through `STATISTICS`'s existing counters now moving) |
+| PHYSICAL HARDWARE | **not yet verified** — no boards flashed yet; see "Hardware-dependent tests" below |
 
 ## Phase 6 — firmware<->GUI JSON telemetry, actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs) + real GUI-parser run
 
@@ -701,10 +772,15 @@ All marked **NOT RUN — HARDWARE NOT AVAILABLE**, per
 - [ ] `analogRead()` on GPIO34/35 behaves correctly with ESP-NOW active
 - [ ] OLED (SSD1306) answers at `0x3C` on GPIO21/22 (Nodes S, C)
 - [ ] Buzzer drives correctly on GPIO25
-- [ ] Two boards exchange a real unicast `MSG_DATA`/`MSG_ACK` pair (Phase 4)
+- [ ] Two boards exchange a real unicast `MSG_DATA`/`MSG_ACK` pair (Phase 4
+      mechanism, Phase 7 live traffic — `NODE_A`'s periodic send to `NODE_S`)
 - [ ] A real hop-by-hop retry actually fires after a genuine dropped frame
 - [ ] Real forwarding across 2+ hops (e.g. A -> C -> D -> S) delivers correctly
 - [ ] PDR observed from real hardware send/ACK outcomes (not just the wired mechanism)
+- [ ] A real Serial `'p'`/`'P'` keypress on `NODE_A` produces a real
+      `PRIORITY` packet observed taking the direct `A -> S` hop (Phase 7)
+- [ ] `APPLICATION_TX_INTERVAL_MS` (currently 2000ms, a placeholder) is
+      tuned against real hardware send/ACK/retry timing once observed
 - [ ] `ENABLE_UCB1=1` flashed to real boards, real delivery outcomes
       recorded into the bandit tables, and a real preference shift observed
       (e.g. a historically-poor path stops being chosen)
@@ -731,18 +807,20 @@ as of Phase 1, `predictor::linkScore()`/`isUnhealthy()` as of Phase 2,
 `anomaly::evaluate()`/the sensor state machine as of Phase 3,
 `reliability`'s packet identity/ACK/retry/duplicate-filter/forwarding as of
 Phase 4, `ucb1_core`'s bandit statistics/selection formula as of Phase 5,
-and `telemetry`'s JSON serialization as of Phase 6 — see the six *_core
-test suites above. No stub modules remain in `src/` (OLED wiring itself is
+`telemetry`'s JSON serialization as of Phase 6, and `apptraffic`'s
+send-decision/payload logic as of Phase 7 — see the seven *_core test
+suites above. No stub modules remain in `src/` (OLED wiring itself is
 still not implemented, but that's a deferred hardware-integration item, not
 a stub interface — see docs/known-issues.md).
 
-The one real gap left anywhere in this stack is `reliability::send()`'s
-live *caller* (not its mechanism) — see
-[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented),
-the same category of gap Phase 2 documented and accepted for PDR itself.
-Phase 5 inherits this exact same gap one layer further up: even with
-`ENABLE_UCB1=1`, the bandit tables have nothing to learn from until that
-caller exists. Phase 6's telemetry is fully wired and produces real,
-GUI-verified output regardless of this gap — `STATISTICS`'s counters
-simply stay at their honest neutral defaults until real `MSG_DATA` traffic
-exists (see docs/hardware-readiness.md's Part F).
+**`reliability::send()`'s "no live caller" gap — RESOLVED as of Phase 7.**
+Every phase since Phase 4 documented this as the one real gap left
+anywhere in this stack (see
+[decisions.md](decisions.md#reliabilitysend-has-no-live-automatic-caller-in-phase-4--no-application-data-source-was-invented)) —
+`src/apptraffic/` is that caller. This means Phase 5's `ENABLE_UCB1=1`
+bandit tables and Phase 6's `STATISTICS`/`LINK_UPDATE`/`PREDICTION`
+telemetry will now accumulate real data once flashed, instead of staying
+at their honest neutral defaults — see
+[decisions.md](decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s).
+This is a code-level resolution only — nothing above has actually run on
+real hardware yet (see "Hardware-dependent tests" above).

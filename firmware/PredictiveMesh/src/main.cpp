@@ -10,6 +10,7 @@
 #include "reliability/reliability.h"
 #include "telemetry/telemetry.h"
 #include "ucb1/ucb1.h"
+#include "apptraffic/apptraffic.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -137,7 +138,7 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 6 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 7 firmware");
   logger::info("UCB1 adaptive routing: %s", ENABLE_UCB1 ? "ENABLED" : "disabled (default)");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
@@ -178,8 +179,9 @@ void setup() {
 #if ENABLE_UCB1
   ucb1::init();
 #endif
+  apptraffic::init();
 
-  logger::info("Phase 6 firmware ready - entering main loop");
+  logger::info("Phase 7 firmware ready - entering main loop");
 }
 
 void loop() {
@@ -194,6 +196,7 @@ void loop() {
   predictor::tick();
   anomaly::tick();
   reliability::tick();
+  apptraffic::tick();
   telemetry::tick();
 
   if (now - g_lastSensorSample >= SENSOR_SAMPLE_INTERVAL_MS) {
