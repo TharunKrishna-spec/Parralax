@@ -32,7 +32,7 @@ this table describes a stub.
 |---|---|---|
 | `nodeName` | `thisNode().name` | real |
 | `role` | `thisNode().role`, mapped via `roleStr()` | real |
-| `mac` | `WiFi.macAddress()` | **omitted at first boot** — genuinely not yet known (telemetry initializes before transport for the reason below); real once known, never fabricated |
+| `mac` | `WiFi.macAddress()` | real, populated in the FIRST HELLO — fixed Phase 7.1 (see decisions.md's Finding 4 entry: `WiFi.mode(WIFI_STA)`/`WiFi.macAddress()` now run before `telemetry::init()`, which the real MAC doesn't structurally require `transport::begin()`'s later, more failure-prone calls to have completed first) |
 | `firmwareVersion` | new `FIRMWARE_VERSION` constant (`config.h`) | real, but newly introduced this phase — no prior versioning scheme existed (known-issues.md flagged this as unsourced pre-Phase-6) |
 | `config.heartbeatIntervalMs` | `TELEMETRY_HEARTBEAT_INTERVAL_MS` | real |
 | `config.offlineTimeoutMs` | new `TELEMETRY_OFFLINE_TIMEOUT_MS` constant | real, newly introduced (3x heartbeat interval, matching this project's established staleness-tolerance convention) |
@@ -41,9 +41,11 @@ this table describes a stub.
 | `config.ewmaAlpha` | `PREDICTOR_RSSI_EWMA_ALPHA` | real, but this project has **two** real EWMA alphas (RSSI 0.3, PDR 0.1) and the contract's single field can only report one — RSSI's is reported as the more prominent of the two (see decisions.md) |
 | `config.telemetryRatesHz` | computed from `TELEMETRY_LINK/PREDICTION/STATISTICS_INTERVAL_MS` | real |
 
-**Emitted once at boot**, before `transport::begin()` — see decisions.md for
-why (so a real `reportError()` channel exists before anything that could
-fail).
+**Emitted once at boot**, before `transport::begin()`'s channel-set/
+`esp_now_init()` calls — see decisions.md for why (so a real
+`reportError()` channel exists before anything that could genuinely fail).
+`WiFi.mode(WIFI_STA)` and the real MAC read now happen just before this,
+also ahead of anything failure-prone (Phase 7.1 fix).
 
 ## `0x02 HEARTBEAT`
 
@@ -91,48 +93,59 @@ around.
 | Field | Source | Status |
 |---|---|---|
 | `destination` | `nodeName(evt.destination)` | real |
-| `active.hops` | `[thisNode, nextHop]`, always exactly 2 elements | **honest, documented limitation** — see below |
-| `active.hopCount` | real `routing_core` hop count (may exceed `hops.length - 1`) | real value, contract-relationship not always satisfied — see below |
+| `active.hops` | full reconstructed path `[self, ..., destination]` when legitimately determinable, else honest minimal `[self, nextHop]` fallback | **real, fixed Phase 7.1** — see below |
+| `active.hopCount` | derived as `hops.length - 1` at serialization time (`telemetry_core::derivedHopCount()`) — never a separately-trusted value | real, and now structurally guaranteed consistent with `hops` (see below) |
 | `active.score` | `predictor::linkScore(nextHop)` | **derived** — the next-hop's own link score, used as a proxy for "route score" since `routing_core` has no multi-hop composite score concept |
 | `active.state` | always `"ACTIVE"` | real |
 | `candidates[]` | `routing::getCandidates()` (new accessor, wraps the existing Phase-5 `routing_core::enumerateCandidates()`) | real |
-| `candidates[].hops/score/state` | same derivation as `active`'s, `state` is `"ACTIVE"` for the chosen next hop, `"BACKUP"` for the rest | real/derived, same caveats |
+| `candidates[].hops/score/state` | same reconstruction as `active`'s, `state` is `"ACTIVE"` for the chosen next hop, `"BACKUP"` for the rest | real/derived, same caveats |
 | `trafficClass` | `evt.priority ? "PRIORITY" : "NORMAL"` | real |
-| `reason` | `routeReasonStr()`: `PRIORITY_OVERRIDE` / `ROUTE_EXPIRED` / `UNKNOWN` | **derived**, honestly incomplete — `routing_core`'s `RouteEventType` has no fine-grained "why" beyond priority/expiry; `UNKNOWN` is used rather than guessing between `LINK_DEGRADATION`/`STALE_NEIGHBOR`/`ROUTE_RECOVERY`/`MANUAL` (see decisions.md) |
+| `reason` | `routeReasonStr()`: `PRIORITY_OVERRIDE` / `ROUTE_EXPIRED` / `LINK_DEGRADATION` / `ROUTE_RECOVERY` / `UNKNOWN` | **real, extended Phase 7.1** — `LINK_DEGRADATION`/`ROUTE_RECOVERY` are now derived from a real hop-count comparison at the moment of a health-gated reroute (see decisions.md's Finding 6 entry); `STALE_NEIGHBOR`/`MANUAL` remain never-produced — no derivable firmware signal exists for either |
 
-**`hops` limitation — real, demonstrated GUI impact, not silently worked
-around.** Distance-vector routing fundamentally never learns a destination's
-full multi-hop path — only the next hop and total distance. Firmware
-honestly reports only what it locally knows (`[thisNode, nextHop]`); it
-does **not** fabricate the intermediate topology (e.g. inventing `["A","C","D","S"]`
-for a 3-hop route), which would require either hardcoding the static
-topology's known paths (rejected — could silently diverge from what was
-actually, dynamically selected hop-by-hop) or a link-state protocol change
-(out of scope, not requested).
+**`hops` — fixed Phase 7.1 (was: honest, documented 2-element-only
+limitation).** `routing_core::reconstructPath()` (new, pure, read-only) now
+searches the compiled-in static adjacency graph for the UNIQUE loop-free
+path matching `routing_core`'s own already-computed real hop count, and
+returns it only when that uniqueness is provable — never a guess, never
+fabricated intermediate nodes. Verified (7 new `test_routing_core.cpp`
+checks) to correctly reconstruct both demo-relevant routes
+(`A→B→S`, `A→C→D→S`) and the direct priority path (`A→S`), while correctly
+refusing to guess for a real, separately-verified graph-level ambiguity
+that exists for some other (self, destination) pairs in this topology (see
+decisions.md). `hopCount` is no longer capable of disagreeing with
+`hops.length - 1` — it's derived from `hops` at serialization time, not
+stored/passed independently, closing off the inconsistency class entirely
+(not just this one instance of it).
 
-**Verified real consequence (Part O, run against the GUI's own unmodified
-JS):** the console's topology-diagram animation (`setRoute()`, driven by
-`routeKey(hops)` joining the array — e.g. `"AB"` for a 2-element array) only
-recognizes the exact literal strings `"ABS"`, `"ACDS"`, `"AS"` (this
-topology's known full A-to-S paths, hardcoded in the GUI). A real
-`ROUTE_UPDATE` for a 2+-hop route (e.g. `hops:["A","B"]`, `hopCount:2`)
-produces `routeKey` `"AB"` — **not** one of the three recognized strings —
-so the GUI logs `PARSE WARNING: unrecognized firmware route: "AB"` and does
-**not** animate the topology diagram for it, even though `state.firmware.route`/
-`candidates` are stored and rendered correctly in the "Route candidates"
-panel (a separate, data-driven display that doesn't depend on `routeKey`
-matching). Confirmed by executing the GUI's real `applyTelemetry()`/`setRoute()`
-against real firmware-generated `ROUTE_UPDATE` output — not predicted, not
-worked around, not a GUI edit. **STOPPING here per Part O's explicit
-instruction rather than modifying the GUI** — the topology-diagram-animation
-gap is a real limitation, tracked in known-issues.md, to be resolved (if
-ever) by a genuine design decision (e.g. a future link-state extension),
-not a quick fix on either side.
+**GUI topology-diagram-animation gap — RESOLVED for both demo routes, verified
+against the GUI's real code, not assumed.** `mesh-command-console.html`'s
+`routeKey(hops){return hops.join('')}` (read directly from `gui-main/`,
+never modified) turns a correctly-reconstructed `["A","B","S"]`/
+`["A","C","D","S"]`/`["A","S"]` into exactly `"ABS"`/`"ACDS"`/`"AS"` — the
+three literal strings the GUI's topology-diagram animation already
+recognized (hardcoded on the GUI side, unchanged). The Phase 6 gap
+(`decisions.md`'s "GUI's topology-animation route-key matching doesn't
+recognize a real 2-hop ROUTE_UPDATE" entry, kept as the historical record
+of why it existed) is resolved not by touching the GUI, but by firmware
+finally reporting the real full path it was always structurally capable of
+determining for this fixed topology. Not re-run through the full Phase 6
+Node.js GUI-parser harness this pass (time-scoped decision — the fix was
+verified by reading `routeKey()`'s real, unchanged one-line source
+directly rather than rebuilding the disposable harness); re-running that
+harness would be a reasonable follow-up before physical demo rehearsal.
 
-Emitted on real `ROUTE_CHANGED` events only (not `ROUTE_SELECTED`, which
-fires on every decision query — far too frequent — see decisions.md);
-skipped entirely when there's no valid next hop (`ROUTE_INVALIDATED`) —
-firmware never claims an active route exists when it doesn't.
+Emitted on a real `ROUTE_CHANGED` table mutation, **or** (fixed Phase 7.1
+— see decisions.md's Finding 6 entry) a `ROUTE_SELECTED` decision whose
+winning next hop genuinely differs from what was last reported for that
+destination — never on the many `ROUTE_SELECTED` calls (one per
+`reliability::send()`/forward) where the choice is unchanged, so this
+still isn't "every decision query." This widening is what makes a
+health-driven reroute (the demo's "B degrades → A reroutes via C-D"
+scenario) visible at all — the table itself doesn't mutate when only link
+health changes, so `ROUTE_CHANGED` alone would never fire for it (a real,
+now-fixed gap, not by design). Skipped entirely when there's no valid next
+hop (`ROUTE_INVALIDATED`) — firmware never claims an active route exists
+when it doesn't.
 
 ## `0x06 PREDICTION`
 
@@ -166,7 +179,7 @@ every node's real sensor data is sent and stored regardless.
 | Firmware event source | Mapped `eventType` | Status |
 |---|---|---|
 | `routing::ROUTE_SELECTED` (priority only) | `PRIORITY_ROUTE` | real |
-| `routing::ROUTE_CHANGED` | `ROUTE_CHANGE`, with real old-vs-new `oldHops`/`newHops`/`oldScore`/`newScore` (adapter-local cache, see decisions.md) | real |
+| `routing::ROUTE_CHANGED`, plus a genuinely-changed `ROUTE_SELECTED` (fixed Phase 7.1) | `ROUTE_CHANGE`, with real old-vs-new `oldHops`/`newHops` (now full reconstructed multi-hop paths, not single-letter abbreviations)/`oldScore`/`newScore`, and a real derived `reason` (`LINK_DEGRADATION`/`ROUTE_RECOVERY`/`UNKNOWN`) (adapter-local cache, see decisions.md) | real |
 | `routing::ROUTE_INVALIDATED` | `ROUTE_CHANGE` (`reason:"ROUTE_EXPIRED"`, empty `newHops`) | real |
 | `predictor::LINK_DEGRADING` | `LINK_DEGRADING` | real |
 | `predictor::LINK_UNHEALTHY` | `LINK_FAILURE` | real |

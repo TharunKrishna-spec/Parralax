@@ -755,3 +755,119 @@ question (both team-input items, see `docs/hardware-readiness.md`), and
 UART/RESET/BOOT pin confirmation against the physical boards. OLED wiring
 itself remains deferred (unrelated to this phase). Do not start any of
 these without explicit instruction.
+
+## Phase 7.1 — Red-team integration hardening pass (11 findings audited)
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for whatever comes next (including physical flashing).
+
+### Objective
+An independent code review raised 11 findings against the Phase 0-7
+firmware. Investigate each against the source-of-truth order
+(implementation-guide.html → existing `decisions.md` → current docs →
+actual firmware → the frozen GUI contract) before changing anything;
+fix only genuine bugs; where a finding is false, verify and document why
+rather than changing code. Explicitly not a new feature phase — no
+architecture redesign, no drift from the guide, `ENABLE_UCB1` stays `0`.
+
+### What was built (real fixes)
+- `src/routing/routing_core.h/.cpp`: new `reconstructPath()` — a pure,
+  stateless, read-only graph search over the compiled-in static topology
+  that reconstructs the unique full node-path for a given (destination,
+  via, hopCount), refusing to guess when the graph is ambiguous or the
+  hop count has no matching path. Fixes a real, provable contract
+  violation (`ROUTE_UPDATE.hops`/`hopCount` could disagree — e.g.
+  `hops:["A","C"]` next to `hopCount:3`).
+- `src/telemetry/telemetry_core.h/.cpp`: `RouteEntry.hops` is now
+  variable-length (was a fixed 2-element array); `hopCount` is derived
+  from `hops.length - 1` at serialization time rather than stored
+  separately, making the contract's own stated invariant impossible to
+  violate by construction. `routeReasonStr()` now takes a `RouteReason`
+  enum with two new real, derivable values (`LINK_DEGRADATION`/
+  `ROUTE_RECOVERY`).
+- `src/telemetry/telemetry.cpp`: `onRouteEvent()` widened to detect a
+  genuine health-driven reroute from `ROUTE_SELECTED` (not just table-
+  mutation `ROUTE_CHANGED`) — fixes a real, latent gap where the demo's
+  headline "B degrades → A reroutes via C-D" scenario could never produce
+  a `ROUTE_UPDATE`/`ROUTE_CHANGE` telemetry message at all. Reason is
+  derived from a real hop-count comparison (longer path = degradation,
+  shorter = recovery), never guessed. `EVENT`'s `oldHops`/`newHops` now
+  use the same real path reconstruction instead of single-letter
+  abbreviations.
+- `src/main.cpp`: `WiFi.mode(WIFI_STA)`/`WiFi.macAddress()` moved ahead of
+  `telemetry::init()` — the first HELLO now carries the real MAC, which
+  doesn't structurally require the rest of `transport::begin()` to finish
+  first.
+- Wording-only fixes (no code change): `architecture.md`'s predictor
+  layer-stack label ("staleness fusion" → accurately described as an
+  independent fast-path); the "quality-optimal routing" description
+  tightened to the review's own suggested precise phrasing; a math error
+  in this session's own prior chat-text report and `config.h`/`decisions.md`
+  ("below routing's beacon cadence," when 2000ms > 1000ms) corrected.
+- 14 new host tests: 7 in `test_routing_core.cpp` (`reconstructPath()`,
+  including a real, independently-verified graph-level ambiguity case),
+  5 in `test_telemetry_core.cpp` (derived `hopCount`, the `RouteReason`
+  enum).
+
+### What was verified and found NOT to be a bug (no code change)
+Predictor staleness is correctly an independent fast-path, not a third
+fused `link_score` term (matches the guide's exact 2-term formula and the
+`PERSONAL_DOCS` blueprint's independent "reroute lead-time" framing);
+`routing_core::selectNextHop()`'s binary health-gated shortest-hop-count
+selection (not continuous route-quality optimization); `apptraffic`'s
+reliability/routing usage (no transport bypass, no sequence-identity
+confusion); no accidental OLED driver code exists in production firmware;
+the MAC table is byte-for-byte correct; the Serial priority-trigger
+mechanism (no flood risk, doesn't conflict with telemetry output); no
+`hardware-readiness.md`/`hardware-bringup.md` contradiction of the
+specific pattern named; no other overclaiming phrase found beyond the two
+fixed above. See `docs/decisions.md` for each finding's full
+investigation record (source-of-truth layers checked, alternatives
+considered).
+
+### What was explicitly NOT built (by design)
+Any redesign of `routing_core`/`predictor_core`/`reliability_core`/
+`ucb1_core` (all confirmed correct as-is); a general link-state protocol
+extension (considered and rejected for Finding 5 — the static-graph
+search is sufficient and doesn't require one); `LINK_FAILURE`/
+`STALE_NEIGHBOR`/`MANUAL` route reasons (no derivable firmware signal for
+any of them — `UNKNOWN` used honestly instead); a full re-run of Phase 6's
+disposable Node.js GUI-parser harness (verified instead by reading the
+GUI's real, unmodified `routeKey()` source directly — a narrower but still
+real, non-predicted check); any change to `gui-main/` (confirmed via
+`git diff --stat gui-main/` returning empty, both before and after); any
+change to `ENABLE_UCB1`'s default (stays `0`); physical hardware flashing.
+
+### Validation performed
+- `test_routing_core.cpp`: 37/37 (28 baseline + 9 new — 7 for
+  `reconstructPath()` plus its own regression proof).
+- `test_telemetry_core.cpp`: 99/99 (94 baseline + 5 new).
+- Full existing suite re-run: `test_predictor_core` 31/31,
+  `test_anomaly_core` 50/50, `test_reliability_core` 88/88,
+  `test_ucb1_core` 26/26, `test_apptraffic_core` 29/29 — **360/360 total,
+  all seven host suites, actually run.**
+- **Real `arduino-cli compile` performed for BOTH configurations**:
+  `ENABLE_UCB1=0` (915,928 bytes flash / 48,656 bytes RAM) and
+  `ENABLE_UCB1=1` (918,104 bytes flash / 49,056 bytes RAM) — both clean on
+  the first attempt, 0 errors, 0 warnings. Restored to `ENABLE_UCB1=0` and
+  re-verified byte-identical to the first compile.
+- `git diff --stat -- gui-main/` confirmed empty both before and after
+  this phase's work.
+- GUI `routeKey()` compatibility verified by reading
+  `mesh-command-console.html`'s real, current source directly (not
+  modified, not predicted).
+- No hardware-dependent validation — no boards flashed this phase.
+
+### Git
+No commits were made by this session. `gui-main/` was not touched. (Note:
+a commit — `7b712ef "phase 7"` — was found at `HEAD` at the start of this
+phase, made by the user/teammate between sessions, not by this session;
+this phase's own uncommitted changes sit on top of it.)
+
+### Next phase (not started, awaiting explicit go-ahead)
+Physical flashing — no new software-side blockers were introduced or
+found this phase. Remaining blockers unchanged from Phase 7: OLED
+size/controller confirmation and the 0.96" sketch's address question
+(team input), UART/RESET/BOOT pin confirmation. A reasonable
+(not-yet-done) follow-up: re-run the Phase 6 GUI-parser harness against
+this phase's `ROUTE_UPDATE` fix for full end-to-end confirmation before
+demo rehearsal. Do not start any of these without explicit instruction.

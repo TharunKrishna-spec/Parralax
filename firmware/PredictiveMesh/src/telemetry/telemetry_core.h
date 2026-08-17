@@ -61,7 +61,17 @@ const char* linkStateStr(LinkClass c);        // LINK_UPDATE's `state` vocabular
 const char* predictionStateStr(LinkClass c);  // PREDICTION's `predictionState` vocabulary (STABLE/TIMEOUT instead of HEALTHY/STALE)
 const char* hysteresisStateStr(float linkScore, float tLow, float tHigh);
 const char* roleStr(NodeRole role);
-const char* routeReasonStr(bool priority, bool invalidated);
+
+// Phase 7.1 (red-team Finding 6): the contract's routeReason vocabulary has
+// 8 values; only these 5 are ever derivable from real firmware state
+// without inventing a signal firmware doesn't actually have — see
+// docs/decisions.md for why LINK_FAILURE/STALE_NEIGHBOR/MANUAL are never
+// produced (routing's health gate is binary, so it can't distinguish
+// "degrading" from "failed", and nothing in this firmware issues a
+// route change on human command).
+enum class RouteReason : uint8_t { PRIORITY_OVERRIDE_R, ROUTE_EXPIRED_R, LINK_DEGRADATION_R, ROUTE_RECOVERY_R, UNKNOWN_R };
+const char* routeReasonStr(RouteReason reason);
+
 const char* sensorHealthStr(uint8_t anomalySensorState);  // takes anomaly_core::SensorState as uint8_t to stay decoupled from that header
 
 // ---- 0x01 HELLO ----
@@ -112,9 +122,21 @@ struct LinkUpdatePayload {
 size_t buildLinkUpdate(const Envelope& env, const LinkUpdatePayload& p, char* buf, size_t bufSize);
 
 // ---- 0x05 ROUTE_UPDATE ----
+// Phase 7.1 (red-team Finding 5): `hops` is now the real, ordered node
+// sequence [self, ..., destination] whenever the adapter could legitimately
+// reconstruct it (routing_core::reconstructPath() — real graph search over
+// the compiled-in static topology, never fabricated), falling back to the
+// honest minimal [self, nextHop] pair when it couldn't (ambiguous or no
+// matching graph path — see docs/decisions.md). `hopCount` is deliberately
+// NOT a separately-stored field here: buildRouteUpdate() derives it as
+// `hopsLen - 1` at serialization time, which makes the contract's own
+// stated invariant (`hopCount == hops.length - 1`) impossible to violate by
+// construction — the previous [2]-element-hops-with-a-independently-passed-
+// hopCount shape is exactly what let that invariant drift out of sync
+// (a real, demonstrated bug — see docs/known-issues.md).
 struct RouteEntry {
-  const char* hops[2];   // [thisNode, nextHop] — see docs/known-issues.md for why only 2 elements are ever populated
-  uint8_t hopCount;       // real routing_core distance; may exceed hops[]'s own length-1 — documented gap
+  const char* hops[NODE_ID_COUNT];  // ordered [self, ..., destination]; only hops[0..hopsLen-1] are valid
+  uint8_t hopsLen;                   // number of valid hops[] entries; always >= 1 in a well-formed instance
   float score;
   const char* state;     // ACTIVE or BACKUP
 };

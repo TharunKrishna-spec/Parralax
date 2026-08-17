@@ -20,7 +20,22 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 7 complete** (2026-08-17) — real application traffic
+**Phase 7.1 complete** (2026-08-17) — a red-team integration hardening
+pass: fixed a real `ROUTE_UPDATE.hops`/`hopCount` contract-consistency bug
+(new `routing_core::reconstructPath()`, a bounded/deterministic graph
+search — never fabricated — that also resolves the Phase 6 GUI
+topology-animation gap for both demo routes), fixed a real latent gap
+where a health-driven reroute could never produce `ROUTE_UPDATE`/
+`ROUTE_CHANGE` telemetry at all, extended `routeReason` with two real,
+derivable values (`LINK_DEGRADATION`/`ROUTE_RECOVERY`), and fixed
+`HELLO.mac` being omitted at first boot when the real MAC was actually
+available earlier. Several other review findings (predictor/staleness
+math, routing selection semantics, MAC table correctness, the Serial
+priority trigger, OLED, hardware-doc consistency) were investigated and
+confirmed NOT bugs — two doc-wording overclaims were tightened as a
+result. See `docs/phase-log.md`'s Phase 7.1 entry and `docs/decisions.md`
+for the full per-finding record. 360/360 host tests, both `ENABLE_UCB1`
+compile configs clean. Builds on Phase 7's real application traffic:
 (`src/apptraffic/`: `NODE_A` -> `NODE_S`, real POT/LDR payload,
 Serial-triggered priority packet), on top of the Phase 0-6 firmware
 foundation (routing/predictor/anomaly/reliability/UCB1/telemetry). See

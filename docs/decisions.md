@@ -2554,14 +2554,24 @@ entries go at the bottom. Format:
   comfortably above one hop-transmission's own worst-case retry window —
   `(1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS` = `4 *
   200ms` = 800ms — so in the common case a new send is never issued while
-  the previous series' retries are still resolving; (2) well under a rate
-  that would compete with `ROUTING_HELLO_INTERVAL_MS` (1000ms) beacon
-  traffic every single cycle, keeping the shared ESP-NOW channel and the
-  Serial/GUI log legible during a live demo; (3) frequent enough that
-  `PREDICTOR_PDR_EWMA_ALPHA`'s (0.1, ~20-sample-equivalent) window and the
-  GUI's `STATISTICS` panel show real, visibly-moving numbers within a
-  demo-length (a few minutes) window, not requiring an implausibly long
-  wait.
+  the previous series' retries are still resolving; (2) exactly 2x
+  `ROUTING_HELLO_INTERVAL_MS`'s (1000ms) beacon interval — application
+  traffic adds at most one extra transmission for every two beacon cycles,
+  never a competing send on literally every single cycle, keeping the
+  shared ESP-NOW channel and the Serial/GUI log legible during a live
+  demo; (3) frequent enough that `PREDICTOR_PDR_EWMA_ALPHA`'s (0.1,
+  ~20-sample-equivalent) window and the GUI's `STATISTICS` panel show
+  real, visibly-moving numbers within a demo-length (a few minutes)
+  window, not requiring an implausibly long wait.
+  - **Correction (Phase 7.1, red-team Finding 3):** the original write-up
+    of point (2) above (and this session's own prior chat-text final
+    report) described 2000ms as "below routing's beacon cadence" — a
+    numerically false statement (2000ms > 1000ms, not below it). The
+    *actual* relationship was, and remains, correct and unchanged (2x the
+    beacon interval, not competing every single cycle) — only the wording
+    was wrong, not the chosen value or the underlying reasoning. No code
+    changed; `APPLICATION_TX_INTERVAL_MS` stays `2000`. See
+    `config.h`'s own comment, corrected identically.
 - **Alternatives considered:** 500ms (faster PDR convergence); 5000ms
   (minimal channel usage).
 - **Why alternatives were rejected:** 500ms risks a new send overlapping a
@@ -2672,3 +2682,431 @@ entries go at the bottom. Format:
   observer reconstruct true end-to-end delivery confirmation from
   per-hop ACKs alone.
 - **Phase/date:** Phase 7, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 1 (predictor/staleness): VERIFIED-NOT-A-BUG, wording tightened
+- **Decision:** No change to `predictor_core`. Staleness remains an
+  independent fast-path (`applyStalenessCheck()` forces `UNHEALTHY`
+  immediately and bypasses `recomputeLocked()`'s score math entirely — see
+  `predictor_core.cpp`), never a third term fused into `link_score`.
+  `link_score` stays exactly `w1*(1-degrade_term) + w2*pdrEwma`, two terms,
+  matching implementation-guide.html's own stated formula
+  (`link_score = w1 * (1.0 - degrade_term) + w2 * pdr`) character-for-
+  character. Only `architecture.md`'s layer-stack table label ("PDR EWMA +
+  staleness fusion") was corrected — that phrase was real overclaiming,
+  even though the code and the rest of `architecture.md`'s own predictor
+  section already described the fast-path correctly.
+- **Reason:** Checked all four source-of-truth layers in order: (A) the
+  guide's own formula/pseudocode has exactly two terms, no staleness term,
+  and separately frames a "heartbeat timeout stays armed regardless, as a
+  hard fallback" — i.e. explicitly a SEPARATE mechanism from the
+  link_score-threshold reroute path; (B) `PERSONAL_DOCS`'s blueprint docs
+  independently confirm this via the "reroute lead-time" metric
+  definition, framed as "time between `link_score` crossing threshold and
+  when the heartbeat-timeout *would* have fired" — only coherent if the
+  two are distinct mechanisms; (C) the actual code (`predictor_core.cpp`)
+  implements exactly this: a stale neighbor short-circuits straight to
+  `UNHEALTHY` without ever computing a fused score from stale data; (D)
+  this is documented as the chosen design already, in this project's own
+  Phase 2 `config.h` comments (`PREDICTOR_STALENESS_TIMEOUT_MS`'s
+  rationale) and prior `decisions.md`/`parameters.md` entries.
+- **Alternatives considered:** Rewrite `link_score` to include a `-w3 *
+  stale_term`, as the review's own hypothesis suggested checking.
+- **Why alternatives were rejected:** Would contradict all four
+  source-of-truth layers above, which unanimously describe two independent
+  mechanisms (a continuous score-and-hysteresis path, and a discrete
+  silence fast-path), not one fused formula. This is exactly the kind of
+  "review is evidence to investigate, not authority to implement" case the
+  session's own instructions anticipated.
+- **Impact:** Zero code change. One documentation-wording fix
+  (`architecture.md`'s layer-stack table).
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 2 (routing semantics): VERIFIED-NOT-A-BUG, wording tightened
+- **Decision:** No change to `routing_core::selectNextHop()`. Confirmed
+  from source: NORMAL selection computes the minimum-hop-count candidate
+  among only the healthy ones, separately computes the minimum-hop-count
+  candidate among all eligible ones, and returns the former if it exists
+  at all — regardless of hop-count comparison — falling back to the
+  latter only when no healthy candidate exists. This is binary
+  health-gated shortest-hop-count selection with a topology-level
+  priority-only-edge exclusion, never a continuous, multi-hop, globally
+  route-quality-optimized search. `architecture.md`'s "Node topology" and
+  "Routing + predictor integration" sections were tightened to state this
+  precisely (matching the review's own suggested phrasing almost
+  verbatim), including correcting a subtly-imprecise earlier sentence
+  ("prefers a healthy candidate... at the same or worse hop count," which
+  could be misread as health only mattering when hop counts tie or favor
+  the unhealthy candidate — the real rule is unconditional: any healthy
+  candidate beats any unhealthy one, full stop).
+- **Reason:** `routing_core.cpp`'s `selectNextHop()` was read directly
+  (not inferred from docs) — see the two-running-bests
+  (`bestHealthy`/`bestAny`) implementation. "Quality-optimal routing" as a
+  *label* (contrasted against the priority override) is the source
+  blueprint's own vocabulary
+  (`PERSONAL_DOCS/I01-final-blueprint (3).md`'s "Support priority messages
+  that override the normal quality-optimal route") — not stripped, since
+  it's real source-of-truth terminology, but no longer left to imply a
+  stronger mechanism than exists.
+- **Alternatives considered:** Remove "quality-optimal" entirely as
+  potentially misleading.
+- **Why alternatives were rejected:** It's the blueprint's own name for
+  this routing mode (contrasted with "priority mode") — removing a
+  source-of-truth term risks losing traceability to the spec more than
+  keeping it (now precisely scoped) does.
+- **Impact:** Zero code change. `architecture.md` wording tightened in two
+  places.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 3 (application traffic audit): VERIFIED-NOT-A-BUG, one wording correction
+- **Decision:** No code change. Confirmed by re-reading `apptraffic.cpp`/
+  `apptraffic_core.cpp`/`reliability.cpp` line-by-line: `apptraffic`
+  never calls `transport::send()` directly (only `reliability::send()`);
+  `buildSendDecision()` always addresses `NODE_S`; NORMAL/PRIORITY
+  classification is correct and matches `reliability::send()`'s own
+  `priority` bool exactly; `DATA_WIRE_SIZE` (10) is comfortably under
+  `PACKET_MAX_PAYLOAD` (64); `apptraffic_core::State.appSeqCounter` is
+  encoded only as opaque payload bytes, never read or written by
+  `reliability_core`/`MeshPacket.sequence`, and the GUI telemetry
+  envelope's own `seq` (`telemetry.cpp`'s `g_seq`) is a third, separately
+  incremented counter — all three verified structurally incapable of
+  cross-contaminating each other (different structs, different owners,
+  different call sites).
+- **Reason:** The one real defect found was a **wording** bug, not a code
+  bug: this session's own prior chat-text final report described
+  `APPLICATION_TX_INTERVAL_MS` (2000ms) as "below routing's beacon cadence"
+  (`ROUTING_HELLO_INTERVAL_MS` = 1000ms) — 2000 is not below 1000. See the
+  correction appended to the
+  [`APPLICATION_TX_INTERVAL_MS = 2000ms`](#application_tx_interval_ms--2000ms)
+  entry above and `config.h`'s corrected comment: the real, intended, and
+  still-correct relationship is "2x the beacon interval, not competing
+  every single cycle."
+- **Alternatives considered:** N/A — verification pass, not a design
+  choice.
+- **Impact:** `config.h` comment reworded; `decisions.md`'s
+  `APPLICATION_TX_INTERVAL_MS` entry amended with a correction note.
+  `APPLICATION_TX_INTERVAL_MS` itself is unchanged at `2000`.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 4 (HELLO MAC): FIXED — real MAC now available before the first HELLO
+- **Decision:** `main.cpp`'s `setup()` now calls `WiFi.mode(WIFI_STA)` and
+  `WiFi.macAddress(mac)` *before* `telemetry::init()`, and passes the real
+  `mac` into it (previously `telemetry::init(nullptr)`, with the real MAC
+  fetched only after `transport::begin()` succeeded). `telemetry::init()`
+  still runs before `transport::begin()`'s channel-set/`esp_now_init()`
+  calls, preserving the original Phase 6 goal (a real `bootId`/`reportError()`
+  channel exists before anything that can genuinely fail).
+- **Reason:** Inspected `espnow_transport.cpp::begin()`: its own first
+  statement is `WiFi.mode(WIFI_STA)`, called well before
+  `esp_wifi_set_channel()`/`esp_now_init()` (the calls that can actually
+  fail and return a `Status` error). `WiFi.macAddress()` reads the
+  hardware-burned efuse MAC and is valid as soon as STA mode is set — it
+  does not need ESP-NOW itself to be initialized. This means the Phase 6
+  reasoning ("the real MAC genuinely isn't known yet at this point") was
+  based on an unnecessarily coarse dependency (treating the whole of
+  `transport::begin()` as one unsplittable unit) rather than the real,
+  finer-grained one (only `WiFi.mode(WIFI_STA)`). The frozen GUI
+  contract's own field table marks `HELLO.mac` "required when available" —
+  it genuinely IS available this early, so omitting it was leaving real
+  information out unnecessarily, not a forced tradeoff.
+- **Alternatives considered:** (a) Leave HELLO's `mac` omitted at boot,
+  document as a permanent limitation. (b) Move `telemetry::init()` to
+  after the full `transport::begin()` call, accepting that a
+  `transport::begin()` failure would then have no real `bootId`/error
+  channel yet.
+- **Why alternatives were rejected:** (a) was only ever a Phase 6
+  approximation, not a hard constraint — real information the GUI contract
+  wants was being withheld for no remaining reason once the finer-grained
+  dependency was identified. (b) would regress Part J's original,
+  still-valid goal (a real error-reporting channel before anything that
+  can fail) for no benefit, when the actual fix needed only two cheap,
+  side-effect-free calls (`WiFi.mode()`/`WiFi.macAddress()`) moved earlier,
+  not a full reordering.
+- **Impact:** `telemetry_core.h`/`.cpp` unchanged — `HelloPayload.mac`
+  already supported a real value (Phase 6's `test_hello_with_and_without_mac`
+  host test already covers both branches); no new host test needed, since
+  this is purely an adapter call-site/ordering fix, verified by the real
+  ESP32 compile (0 errors/0 warnings, both `ENABLE_UCB1` configs). The log
+  line "record this in core/node_id.h's NODE_TABLE once hardware exists"
+  was also corrected to "verify this matches ... for this node" — the MAC
+  table is real as of Phase 7, so the old wording was stale.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 5 (ROUTE_UPDATE hops): FIXED — real, bounded, deterministic path reconstruction
+- **Decision:** Added `routing_core::reconstructPath(self, destination,
+  via, hopCount, out, maxOut)` — a pure, stateless, read-only graph search
+  over the compiled-in static adjacency graph (`core/node_id.h::neighborsOf()`)
+  that finds the UNIQUE loop-free path of exactly `hopCount` edges from
+  `via` to `destination`, excluding `self` from ever being revisited (a
+  real simple path can't loop back through its own origin). Returns 0 —
+  never a guess — when the graph admits zero or more than one distinct
+  path of that length. `telemetry_core::RouteEntry.hops` changed from a
+  fixed 2-element array to a variable-length one (`hops[NODE_ID_COUNT]` +
+  `hopsLen`); `hopCount` is no longer a separately-stored/passed field —
+  `buildRouteUpdate()` now derives it as `hopsLen - 1` at serialization
+  time. `telemetry.cpp`'s `emitRouteUpdateFor()` calls `reconstructPath()`
+  for both `active` and every candidate, falling back to the honest
+  minimal `[self, nextHop]` (2 elements, so a derived `hopCount` of 1) only
+  when reconstruction can't legitimately determine a unique path.
+- **Reason:** The review's concern was real and provable: firmware was
+  emitting `hops:["A","C"]` (2 elements) alongside `hopCount:3` (the real
+  `routing_core` distance for a 3-hop A→C→D→S route) — a direct violation
+  of the frozen GUI contract's own explicitly stated invariant
+  (`gui-telemetry-contract.md`: "`hopCount` equals `hops.length - 1`").
+  Before implementing anything, this was checked for legitimacy against
+  every source layer: the static 5-node topology (A-B, A-C, A-S, B-S,
+  C-D, D-S) is fixed and identically compiled into every node's firmware
+  (not something a real ad hoc mesh would need to discover), so a node
+  already has full structural knowledge of the graph shape, just not which
+  specific path a given hop-count corresponds to. Hand-verified (and then
+  host-test-confirmed, 7/7 new `test_routing_core.cpp` checks) that: (1)
+  A's real 2-hop route via B reconstructs uniquely to A-B-S; (2) A's real
+  3-hop backup route via C reconstructs uniquely to A-C-D-S (this
+  topology's headline demo reroute target); (3) a genuine graph-level
+  ambiguity DOES exist for some (self, destination) pairs not central to
+  the demo (e.g. B's own route to D via A: excluding self=B leaves a
+  4-cycle A-S-D-C-A, and A's distance to D within it is tied at 2 hops
+  both ways, A-C-D and A-S-D) — proving the ambiguity-detection path isn't
+  defensive boilerplate, it's load-bearing. **A very significant, verified
+  (not assumed) side effect**: `gui-main/mesh-command-console.html`'s real
+  `routeKey(hops){return hops.join('')}` (read directly, not modified)
+  means a correctly-reconstructed `["A","B","S"]`/`["A","C","D","S"]`/
+  `["A","S"]` now produces exactly `"ABS"`/`"ACDS"`/`"AS"` — the three
+  literal strings the GUI's topology-diagram animation already recognizes.
+  This resolves the Phase 6 GUI-compatibility gap
+  ([decisions.md](decisions.md#guis-topology-animation-route-key-matching-doesnt-recognize-a-real-2-hop-route_update--flagged-not-worked-around-phase-6))
+  for both demo-relevant routes — not by changing the GUI (untouched,
+  `git diff --stat gui-main/` confirmed empty), but by firmware finally
+  reporting the real full path it was always structurally capable of
+  knowing.
+- **Alternatives considered:** (a) Leave `hops` at 2 elements, force
+  `hopCount` to also report 1 always (contract-consistent, but silently
+  discards real, known, longer-distance information in the common case).
+  (b) Hardcode the three known demo paths as a lookup table keyed by
+  destination+nextHop. (c) A general link-state flooding protocol so every
+  node learns full topology dynamically (not just this fixed graph).
+- **Why alternatives were rejected:** (a) would fix the contract violation
+  by deleting real information instead of reporting it — worse than the
+  fix implemented, which reports the real path whenever legitimately
+  knowable and only falls back to the minimal form when it genuinely
+  isn't. (b) was explicitly rejected in Phase 6
+  ([decisions.md](decisions.md#guis-topology-animation-route-key-matching-doesnt-recognize-a-real-2-hop-route_update--flagged-not-worked-around-phase-6))
+  as fabricating provenance for a path that wasn't actually, dynamically
+  derived — `reconstructPath()` is NOT this: it's a real graph search
+  keyed off `routing_core`'s own already-computed, real hop count, proven
+  unique before ever being reported, refusing to answer rather than
+  guessing when it can't prove uniqueness. (c) is a genuine architecture
+  change (a new wire protocol) explicitly out of scope for a red-team fix
+  pass — "do not redesign routing."
+- **Impact:** `routing_core` gains one new, purely additive, read-only,
+  stateless function — `selectNextHop()`/`getNextHop()`/any routing
+  decision is completely untouched (confirmed: `reconstructPath()` is
+  never called from `routing.cpp`, only from `telemetry.cpp`).
+  `telemetry_core::RouteEntry`'s shape changed (a real interface change,
+  contained to this one struct); both call sites (`telemetry.cpp`) and all
+  affected host tests were updated. New tests: 7 in `test_routing_core.cpp`
+  (unique reconstruction for both demo routes and the direct priority
+  path, refusal on an impossible hop count, refusal on genuine ambiguity,
+  loop-protection, out-of-range/undersized-buffer refusal), 2 in
+  `test_telemetry_core.cpp` (multi-hop `hops`/derived `hopCount`
+  end-to-end, and a `hopsLen=0` degenerate-input guard against a real
+  `uint8_t` underflow — `0 - 1` would otherwise wrap to 255, caught and
+  clamped in `derivedHopCount()`). `EVENT`'s `ROUTE_CHANGE.details.oldHops`/
+  `newHops` were also upgraded to use the same real reconstruction (see
+  Finding 6 below) — a natural, low-marginal-cost extension since the
+  machinery already existed, not originally named HIGH PRIORITY but
+  directly serving the same demo scenario.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 6 (route reason): FIXED — a real functional gap, not just a labeling one
+- **Decision:** `telemetry_core::routeReasonStr()` now takes a `RouteReason`
+  enum (`PRIORITY_OVERRIDE_R`/`ROUTE_EXPIRED_R`/`LINK_DEGRADATION_R`/
+  `ROUTE_RECOVERY_R`/`UNKNOWN_R`) instead of two bools. `telemetry.cpp`'s
+  `onRouteEvent()` was widened to also react to NORMAL `ROUTE_SELECTED`
+  events (not just `ROUTE_CHANGED`/`ROUTE_INVALIDATED`) whenever the
+  chosen next hop genuinely differs from what was last reported for that
+  destination, and derives the reason honestly: a `ROUTE_SELECTED`-driven
+  change onto a LONGER real hop count is reported `LINK_DEGRADATION`; onto
+  a SHORTER one, `ROUTE_RECOVERY`; a `ROUTE_CHANGED` table mutation always
+  stays `UNKNOWN` (routing doesn't know why a neighbor's advertisement
+  changed — could be many unrelated things); `LINK_FAILURE`/
+  `STALE_NEIGHBOR`/`MANUAL` are never produced (no derivable firmware
+  signal exists for any of them — see below).
+- **Reason:** Investigating "is the reason ever fabricated" surfaced a more
+  important question first: **does a health-driven reroute even fire a
+  reportable event at all?** Read `routing.cpp` in full: `ROUTE_CHANGED`
+  is fired ONLY from `announceChangedRoutes()`, itself called only when
+  `applyRouteAdvertisement()` returns a real table mutation (a received
+  HELLO changed a stored candidate). `getNextHopInternal()` — the function
+  a health-gated NORMAL selection actually runs through, called by every
+  `reliability::send()`/forward — only ever fires `ROUTE_SELECTED`,
+  regardless of whether the winning candidate differs from the previous
+  call. Since Phase 2's health-gating changes *which candidate wins*
+  without ever mutating the distance-vector table itself, **the demo's
+  headline scenario ("B degrades → A reroutes via C-D") was structurally
+  incapable of producing a `ROUTE_UPDATE`/`ROUTE_CHANGE` telemetry message
+  at all** before this fix — the GUI would simply never show it, silently.
+  This was a real, latent bug since Phase 6, made newly consequential by
+  Phase 7's `apptraffic` giving `ROUTE_SELECTED` a live, regular caller
+  (every `APPLICATION_TX_INTERVAL_MS`) where before there was none.
+  Comparing real hop counts (both always populated, never invented) is a
+  legitimate, provable signal for degradation-vs-recovery precisely
+  because `routing_core`'s health gate is what changes the winning
+  candidate in the first place — no other cause could produce a
+  `ROUTE_SELECTED`-triggered change with a different hop count on an
+  unchanged table. `LINK_FAILURE` was deliberately NOT used for the
+  "moved to a longer path" case: `routing_core::selectNextHop()`'s health
+  gate is a plain boolean (`neighborUnhealthy[i]`), with no
+  "degrading-vs-failed" distinction available at the routing-decision
+  level (that distinction exists only in `predictor_core::LinkEvent`,
+  which routing never consults) — reporting `LINK_FAILURE` instead of
+  `LINK_DEGRADATION` would be inventing a certainty routing doesn't have.
+  `STALE_NEIGHBOR` and `MANUAL` have no firmware signal anywhere in this
+  codebase at all.
+- **Alternatives considered:** (a) Leave `ROUTE_SELECTED` alone and accept
+  that health-driven reroutes are invisible to telemetry. (b) Distinguish
+  `LINK_FAILURE` from `LINK_DEGRADATION` by also checking
+  `predictor::isUnhealthy()`'s underlying `LinkClass` (DEGRADING vs fully
+  UNHEALTHY) at the moment of reroute.
+- **Why alternatives were rejected:** (a) would leave the exact demo
+  scenario this whole project is built to showcase silently unreported to
+  the GUI — not an acceptable "verified, not a bug" outcome once the gap
+  was actually found. (b) would work but reaches into `predictor_core`
+  internals from `routing`'s telemetry-reporting path in a way that
+  couples two currently-independent modules' internal state machines
+  (`routing_core`'s binary health gate vs `predictor_core`'s 6-state
+  `LinkClass`) for a distinction the routing DECISION itself never
+  actually used — the chosen fix stays scoped to information the routing
+  layer's own decision genuinely acted on.
+- **Impact:** `telemetry.cpp`'s `onRouteEvent()`/`emitRouteUpdateFor()`
+  signatures changed (internal to the adapter, no header-level API
+  break for other modules). `EVENT`'s `ROUTE_CHANGE.details.oldHops`/
+  `newHops` now also use real reconstructed multi-hop paths (via a new
+  adapter-local cache field, `CachedRoute.hopsPath`/`hopsPathLen`) instead
+  of the previous single-letter abbreviation — a natural extension of
+  Finding 5's machinery. 5 new `test_telemetry_core.cpp` checks cover the
+  `RouteReason` enum's full string mapping. No `ROUTE_UPDATE` telemetry
+  spam risk: the widened `ROUTE_SELECTED` handling still early-returns on
+  every call where the winning candidate hasn't actually changed (the
+  overwhelming majority of calls, since `apptraffic` calls
+  `reliability::send()` every 2 seconds on an otherwise-healthy network) —
+  verified via the real ESP32 compile (0 errors/0 warnings, both
+  `ENABLE_UCB1` configs) exercising this exact code path.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 7 (OLED): VERIFIED-NOT-A-BUG — still correctly deferred, no accidental production wiring
+- **Decision:** No code change. Confirmed by grepping all of
+  `firmware/PredictiveMesh/src/` for `SSD1306`/`SH110`/`Adafruit_GFX`/
+  `Wire.h`/any OLED driver include: none exists anywhere except
+  `config.h`'s own `OLED_I2C_ADDRESS` constant (a value, not a driver
+  dependency, unchanged since Phase 0). Production firmware has never
+  accidentally inherited anything from the hardware team's bench sketches
+  (`hardware code/`, explicitly separate, never included by
+  `firmware/PredictiveMesh/`).
+- **Reason:** The review's concern (don't assume bench sketches are
+  production config, don't add a driver just because a sketch exists) was
+  already this project's standing position since the Phase 6/hardware
+  bring-up audits — re-verified directly against the actual `src/` tree
+  rather than trusting the prior audit's own memory of it.
+- **Alternatives considered:** N/A — verification pass.
+- **Impact:** None. OLED wiring remains a documented, deferred blocker
+  (`docs/known-issues.md`, `docs/hardware-readiness.md`'s OLED
+  controller/address contradiction), unchanged.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 8 (MAC table): VERIFIED-NOT-A-BUG — byte-for-byte re-checked against the given mapping
+- **Decision:** No change. `core/node_id.h`'s `nodeTable()` was re-read and
+  every byte of every MAC re-compared, digit by digit, against this
+  session's own restated mapping: `NODE_A`=`C0:CD:D6:CF:B9:B4`,
+  `NODE_B`=`88:57:21:E0:89:48`, `NODE_C`=`F4:65:0B:48:EE:AC`,
+  `NODE_D`=`C0:CD:D6:8D:B7:08`, `NODE_S`=`C0:CD:D6:CF:62:98` — exact match,
+  no swapped nodes, no byte-order mistakes, no all-zero entries.
+- **Reason:** A real safety-critical check (a wrong MAC silently breaks
+  ESP-NOW unicast to that peer) worth re-verifying independently rather
+  than trusting the Phase 7 transcription was correct without re-checking.
+- **Alternatives considered:** N/A — verification pass.
+- **Impact:** None. `main.cpp::registerConfiguredPeers()` (unchanged code)
+  already resolves peers through this one table.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 9 (Serial priority command): VERIFIED-NOT-A-BUG
+- **Decision:** No change to `apptraffic.cpp`'s Serial-trigger mechanism.
+  Confirmed: Arduino `Serial` is full-duplex — `Serial.read()` (RX) and
+  `Serial.println()` (TX, used by `logger::*`/telemetry) don't interfere
+  with each other; `apptraffic_core::requestPriority()`/`buildSendDecision()`'s
+  one-shot latch (already host-tested, Phase 7's
+  `test_priority_trigger_does_not_flood`) is idempotent under repeated
+  keypresses and can never produce more than one `PRIORITY` packet per
+  trigger; this mechanism genuinely requires a direct serial terminal
+  connected to `NODE_A` (Arduino IDE Serial Monitor, `screen`, PuTTY) —
+  whether `gui-main/`'s `serial-bridge.py` forwards keystrokes
+  bidirectionally was NOT assumed either way (that script is off-limits to
+  modify or rely on unverified).
+- **Reason:** Re-confirmed the reasoning already recorded in Phase 7's own
+  decision entry
+  ([decisions.md](decisions.md#priority-traffic-trigger-a-single-serial-character-pp-read-on-node_a-not-a-new-command-protocol))
+  against the actual current `apptraffic.cpp` source, not just the
+  original design intent.
+- **Alternatives considered:** N/A — verification pass.
+- **Impact:** None. The demo procedure ("open a serial terminal on
+  `NODE_A`, send `p`") is documented in `docs/testing.md`/`docs/protocol.md`
+  and kept simple, per the review's own instruction.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 10 (hardware readiness docs): VERIFIED-NOT-A-BUG — no contradiction pattern found, discipline already in place
+- **Decision:** No document rewrite beyond the targeted Finding 4/5/6
+  updates (below). Grepped `docs/hardware-readiness.md`,
+  `hardware-bringup.md`, `gui-compatibility-matrix.md`, `system-map.md`
+  for the specific contradiction pattern named ("no hardware-only risks"
+  followed by listed risks): zero matches. Spot-checked the READY-labeled
+  rows in `hardware-readiness.md`'s Part B table: every one already either
+  states plainly what was verified (e.g. "FQBN ... used and verified clean
+  across every phase's real compile") without implying hardware
+  validation, or is explicitly split into two clauses (e.g. "READY
+  (mechanism) / NEEDS TEAM INPUT (value)") precisely to avoid conflating
+  "the code path is real" with "this was proven on hardware."
+- **Reason:** This project's documentation discipline (READY / BLOCKED /
+  NEEDS TEAM INPUT / NOT RUN — HARDWARE NOT AVAILABLE as explicit,
+  distinct labels; a running hardware-dependent checklist in
+  `known-issues.md`/`testing.md` that's never marked passed without a real
+  run) was already established starting Phase 6's pre-flash audit, not
+  introduced this pass — verified it's still actually followed, not just
+  assumed.
+- **Alternatives considered:** A full line-by-line rewrite of all four
+  documents' status labels.
+- **Why alternatives were rejected:** No genuine instance of the flagged
+  contradiction pattern was found to justify it; a speculative rewrite
+  with no confirmed defect would itself risk introducing new
+  inconsistencies for no benefit.
+- **Impact:** `hardware-readiness.md`/`gui-compatibility-matrix.md` were
+  updated where Findings 4/5/6's real fixes changed what's actually true
+  (HELLO.mac, ROUTE_UPDATE hops/reason) — see those entries — not as part
+  of this finding's own (negative) result.
+- **Phase/date:** Phase 7.1, 2026-08-17.
+
+## Phase 7.1 red-team pass — Finding 11 (no-overclaiming audit): two real instances found and fixed (Findings 1/2), rest verified clean
+- **Decision:** Audited the specific flagged phrases ("predictive routing,"
+  "quality-optimal routing," "UCB1 learning," "hardware validated," "real
+  PDR," "route recovery," "OLED integration") across `docs/*.md` via
+  targeted search, cross-checked against actual code/test evidence. Found
+  and fixed exactly two real instances: Finding 1's "staleness fusion" and
+  Finding 2's under-qualified "quality-optimal routing" mention (both
+  detailed above). No instance of "hardware validated," unqualified "UCB1
+  learning," or "OLED integration" (as an accomplished-fact claim) was
+  found anywhere in `docs/`— every existing "proven"/"verified" usage
+  found refers to host-test-proven algorithmic correctness (e.g.
+  "`routing_core`'s already-proven correctness" in the context of a loop-
+  prevention argument, which the 37/37-passing `test_routing_core.cpp`
+  suite genuinely does establish), never to unproven hardware claims.
+  `ROUTE_RECOVERY` as a claim is now MORE accurate than before this pass
+  (Finding 6 made it a real, derivable telemetry value, where previously
+  the enum value existed in the contract but firmware could never actually
+  produce it).
+- **Reason:** This project's documentation was already built, phase over
+  phase, under an explicit "don't fake what isn't real yet" rule
+  (`CLAUDE.md`) enforced by every prior phase's own `known-issues.md`/
+  `testing.md` discipline — this audit's job was to verify that discipline
+  actually held under adversarial review, not to assume it did.
+- **Alternatives considered:** N/A — verification pass.
+- **Impact:** Two wording fixes (Findings 1/2, detailed above); everything
+  else confirmed already accurate.
+- **Phase/date:** Phase 7.1, 2026-08-17.

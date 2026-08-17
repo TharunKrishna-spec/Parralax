@@ -45,8 +45,17 @@ Edges (who is a direct ESP-NOW neighbor of whom):
 The A-S link is deliberately the weakest link in the topology despite being
 the shortest path. That's not an oversight — it's what makes the priority
 override (§5.3 of the implementation guide) visibly different from normal
-quality-optimal routing: priority traffic takes the weak direct hop on
-purpose, normal traffic avoids it.
+routing: priority traffic takes the weak direct hop on purpose, normal
+traffic avoids it. "Normal routing" here (matching the source blueprint's
+own "quality-optimal route" label for this mode, contrasted against the
+priority override) means exactly this, no more: **distance-vector routing
+selects the shortest available route while preferring currently healthy
+next-hop candidates; a degraded link is excluded from preference (never
+from validity), allowing an alternate route to be selected.** It is not a
+continuous, multi-hop, globally-optimized route-quality score — see
+"Routing + predictor integration" below for the precise mechanism, and
+[decisions.md](decisions.md#no-overclaiming-routingpredictor-wording-audit-phase-71-red-team-finding-2)
+for why this phrasing was tightened.
 
 This adjacency is encoded once, in [`core/node_id.h`](../firmware/PredictiveMesh/src/core/node_id.h)'s
 `neighborsOf()` — nothing else in the firmware hardcodes topology.
@@ -60,7 +69,7 @@ Bottom to top, matching implementation-guide.html §01:
 | Transport (ESP-NOW) | **Implemented** (Phase 0) | `src/transport/` |
 | Reliability (hop-by-hop ACK, bounded retry, dup-filter, forwarding) | **Implemented** (Phase 4) | `src/reliability/` |
 | Routing (distance-vector + priority override + link-health-aware selection) | **Implemented** (Phase 1, extended Phase 2) | `src/routing/` |
-| Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
+| Predictor (RSSI EWMA/slope + PDR fused into `link_score`; staleness is an independent fast-path, not a third fused term — see below) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | UCB1 adaptive ranking (stretch, optional) | **Implemented, disabled by default** (Phase 5) | `src/ucb1/` |
 | Reporting (Serial/WebSerial JSON telemetry) | **Implemented** (Phase 6) — OLED still not wired | `src/telemetry/` |
@@ -353,13 +362,20 @@ traffic. The wiring is real; live traffic is not yet.
 **Routing + predictor integration**: `routing::getNextHop()` builds a
 `bool[NODE_ID_COUNT]` health mask from `predictor::isUnhealthy()` and
 passes it into `routing_core::selectNextHop()`'s new optional
-`neighborUnhealthy` parameter. NORMAL selection now prefers a healthy
-candidate over an unhealthy one at the same or worse hop count, falling
-back to the best available candidate if every eligible one is unhealthy
-(health gates *preference*, never *validity* — Phase 1's staleness/
-invalidity mechanism alone still controls whether a candidate exists at
-all). PRIORITY selection ignores the health mask completely and
-unconditionally — link_score can never suppress the priority override.
+`neighborUnhealthy` parameter. Precisely (Phase 7.1 red-team Finding 2
+tightened this description against the real
+`routing_core::selectNextHop()` source): NORMAL selection computes the
+minimum-hop-count candidate among only the *healthy* ones and, separately,
+the minimum-hop-count candidate among *all* eligible ones; if any healthy
+candidate exists at all, it wins outright — **regardless of whether some
+unhealthy candidate has a strictly lower hop count** — falling back to the
+best available candidate only when every eligible one is unhealthy (health
+gates *preference*, never *validity* — Phase 1's staleness/invalidity
+mechanism alone still controls whether a candidate exists at all). This is
+binary health-gated shortest-hop-count selection, not a continuous
+route-quality score comparison. PRIORITY selection ignores the health mask
+completely and unconditionally — link_score can never suppress the
+priority override.
 Critically, this sits **alongside**, not **instead of**, the
 priority-only-edge rule above: without real hardware, `link_score` cannot
 yet organically make the A-S edge look worse than A-B, so removing the

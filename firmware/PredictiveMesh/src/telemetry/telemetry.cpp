@@ -21,13 +21,43 @@ char g_line[telemetry_core::LINE_BUF_SIZE];
 // not a second source of truth for routing (routing_core's own table
 // remains authoritative; this only remembers what telemetry itself last
 // told the GUI).
+//
+// Phase 7.1 (red-team Finding 5/6): also remembers the last REAL,
+// reconstructed hops path (not just the next-hop letter), so a ROUTE_CHANGE
+// EVENT's oldHops/newHops can report genuine multi-hop paths too, and
+// hopCount, so a genuine health-driven reroute (hop count got longer or
+// shorter) can be told apart from an opaque table mutation — see
+// reasonForChange() below.
 struct CachedRoute {
   bool valid;
   NodeId nextHop;
   uint8_t hopCount;
   float score;
+  const char* hopsPath[NODE_ID_COUNT];
+  uint8_t hopsPathLen;
 };
 CachedRoute g_lastRoute[NODE_ID_COUNT];
+
+// Reconstructs the real, full node-letter path for (destination, nextHop,
+// hopCount) via routing_core::reconstructPath() — a real graph search over
+// the compiled-in static topology, never fabricated. Falls back to the
+// honest minimal [self, nextHop] pair (2 elements) when the graph search
+// can't legitimately determine a unique full path (see routing_core.h for
+// exactly when that happens — a real, provable ambiguity, not a cop-out).
+// Shared by emitRouteUpdateFor() (active + every candidate) and
+// onRouteEvent()'s ROUTE_CHANGE EVENT (old + new), so both use the exact
+// same reconstruction, never two different notions of "the route".
+uint8_t reconstructHopsPath(NodeId destination, NodeId nextHop, uint8_t hopCount, const char** out, uint8_t maxOut) {
+  NodeId path[NODE_ID_COUNT];
+  uint8_t n = routing_core::reconstructPath(THIS_NODE_ID, destination, nextHop, hopCount, path, NODE_ID_COUNT);
+  if (n >= 2 && n <= maxOut) {
+    for (uint8_t i = 0; i < n; i++) out[i] = nodeName(path[i]);
+    return n;
+  }
+  out[0] = thisNode().name;
+  out[1] = nodeName(nextHop);
+  return 2;
+}
 
 telemetry_core::Envelope envelope(uint32_t now) {
   telemetry_core::Envelope e{ thisNode().name, g_bootId, g_seq, now };
@@ -47,13 +77,36 @@ void emit(size_t len) {
 // field. Adapter-local glue (not part of telemetry_core - see
 // docs/decisions.md for why each differently-shaped `details` object is
 // built here rather than telemetry_core growing one struct per eventType).
+// Builds a JSON array literal (e.g. "[\"A\",\"C\",\"D\",\"S\"]") from `len`
+// node-letter strings into `out` — adapter-local glue for the ROUTE_CHANGE
+// EVENT's oldHops/newHops (mirrors telemetry_core::wHopsArray's own
+// array-writing discipline, kept here since telemetry_core only ever
+// receives a pre-assembled `details` string, never composes one itself —
+// see docs/decisions.md). Returns 0 (leaves `out` unspecified) if `out`
+// would truncate, never a partial array.
+size_t formatHopsJson(char* out, size_t outCap, const char* const* hops, uint8_t len) {
+  size_t pos = 0;
+  int n = snprintf(out + pos, outCap - pos, "[");
+  if (n < 0 || static_cast<size_t>(n) >= outCap - pos) return 0;
+  pos += static_cast<size_t>(n);
+  for (uint8_t i = 0; i < len; i++) {
+    n = snprintf(out + pos, outCap - pos, "%s\"%s\"", i == 0 ? "" : ",", hops[i]);
+    if (n < 0 || static_cast<size_t>(n) >= outCap - pos) return 0;
+    pos += static_cast<size_t>(n);
+  }
+  n = snprintf(out + pos, outCap - pos, "]");
+  if (n < 0 || static_cast<size_t>(n) >= outCap - pos) return 0;
+  pos += static_cast<size_t>(n);
+  return pos;
+}
+
 void emitEvent(uint32_t now, const char* eventType, const char* severity, const char* source, const char* detailsJson) {
   telemetry_core::EventPayload p{ eventType, severity, source, detailsJson };
   emit(telemetry_core::buildEvent(envelope(now), p, g_line, sizeof(g_line)));
 }
 
 void emitRouteUpdateFor(uint32_t now, NodeId destination, NodeId activeNextHop, uint8_t activeHopCount,
-                        bool priority) {
+                        bool priority, telemetry_core::RouteReason reason) {
   if (activeNextHop == NODE_ID_UNKNOWN) return;  // no valid route to report - see docs/known-issues.md
 
   routing_core::CandidateInfo raw[NODE_ID_COUNT];
@@ -61,24 +114,20 @@ void emitRouteUpdateFor(uint32_t now, NodeId destination, NodeId activeNextHop, 
 
   telemetry_core::RouteEntry candidates[NODE_ID_COUNT];
   for (uint8_t i = 0; i < n; i++) {
-    candidates[i].hops[0] = thisNode().name;
-    candidates[i].hops[1] = nodeName(raw[i].nextHop);
-    candidates[i].hopCount = raw[i].hopCount;
+    candidates[i].hopsLen = reconstructHopsPath(destination, raw[i].nextHop, raw[i].hopCount, candidates[i].hops, NODE_ID_COUNT);
     candidates[i].score = predictor::linkScore(raw[i].nextHop);
     candidates[i].state = (raw[i].nextHop == activeNextHop) ? "ACTIVE" : "BACKUP";
   }
 
   telemetry_core::RouteUpdatePayload p{};
   p.destination = nodeName(destination);
-  p.active.hops[0] = thisNode().name;
-  p.active.hops[1] = nodeName(activeNextHop);
-  p.active.hopCount = activeHopCount;
+  p.active.hopsLen = reconstructHopsPath(destination, activeNextHop, activeHopCount, p.active.hops, NODE_ID_COUNT);
   p.active.score = predictor::linkScore(activeNextHop);
   p.active.state = "ACTIVE";
   p.candidates = candidates;
   p.candidateCount = n;
   p.trafficClass = priority ? "PRIORITY" : "NORMAL";
-  p.reason = telemetry_core::routeReasonStr(priority, false);
+  p.reason = telemetry_core::routeReasonStr(reason);
   emit(telemetry_core::buildRouteUpdate(envelope(now), p, g_line, sizeof(g_line)));
 }
 
@@ -89,7 +138,10 @@ namespace telemetry {
 void init(const uint8_t mac[6]) {
   snprintf(g_bootId, sizeof(g_bootId), "%s-%08x", thisNode().name, static_cast<unsigned>(esp_random()));
   g_seq = 0;
-  for (uint8_t i = 0; i < NODE_ID_COUNT; i++) g_lastRoute[i].valid = false;
+  for (uint8_t i = 0; i < NODE_ID_COUNT; i++) {
+    g_lastRoute[i].valid = false;
+    g_lastRoute[i].hopsPathLen = 0;
+  }
 
   if (mac != nullptr) {
     logger::macToStr(mac, g_macStr);
@@ -235,6 +287,7 @@ void tick() {
 
 void onRouteEvent(const routing::RouteEvent& evt) {
   uint32_t now = millis();
+  CachedRoute& cached = g_lastRoute[evt.destination];
 
   if (evt.type == routing::RouteEventType::ROUTE_SELECTED) {
     if (evt.priority) {
@@ -243,42 +296,79 @@ void onRouteEvent(const routing::RouteEvent& evt) {
                nodeName(evt.destination), evt.next_hop == NODE_ID_UNKNOWN ? "NONE" : nodeName(evt.next_hop),
                static_cast<unsigned>(evt.hop_count));
       emitEvent(now, "PRIORITY_ROUTE", "INFO", thisNode().name, details);
+      return;
     }
-    return;  // not a table-change event - no ROUTE_UPDATE for every decision query
-  }
-
-  CachedRoute& cached = g_lastRoute[evt.destination];
-  char oldHop[2] = "?";
-  float oldScore = 0.0f;
-  bool hadOld = cached.valid;
-  if (hadOld) {
-    oldHop[0] = nodeName(cached.nextHop)[0];
-    oldHop[1] = '\0';
-    oldScore = cached.score;
-  }
-
-  if (evt.type == routing::RouteEventType::ROUTE_INVALIDATED) {
-    if (hadOld) {
+    // Phase 7.1 (red-team Finding 6): NORMAL selection fires on EVERY
+    // decision query (e.g. apptraffic's own periodic reliability::send()),
+    // not just table mutations - a health-driven reroute (the demo's
+    // headline "B degrades -> A reroutes via C-D" scenario) changes the
+    // WINNING candidate without ever mutating routing_core's table, so the
+    // ROUTE_CHANGED path below would never see it on its own. Detect a
+    // real change here by comparing against the same cache ROUTE_CHANGED
+    // uses, and fall through to the identical shared handling below when
+    // one is found — see docs/decisions.md.
+    if (evt.next_hop == NODE_ID_UNKNOWN) return;                  // no valid route - ROUTE_INVALIDATED covers this
+    if (cached.valid && cached.nextHop == evt.next_hop) return;   // unchanged, nothing real to report
+  } else if (evt.type == routing::RouteEventType::ROUTE_INVALIDATED) {
+    if (cached.valid) {
+      char oldHopsJson[64];
+      formatHopsJson(oldHopsJson, sizeof(oldHopsJson), cached.hopsPath, cached.hopsPathLen);
       char details[192];
       snprintf(details, sizeof(details),
-               "{\"oldHops\":[\"%s\",\"%s\"],\"newHops\":[],\"reason\":\"ROUTE_EXPIRED\",\"oldScore\":%.2f,\"newScore\":0.00}",
-               thisNode().name, oldHop, oldScore);
+               "{\"oldHops\":%s,\"newHops\":[],\"reason\":\"ROUTE_EXPIRED\",\"oldScore\":%.2f,\"newScore\":0.00}",
+               oldHopsJson, cached.score);
       emitEvent(now, "ROUTE_CHANGE", "WARN", thisNode().name, details);
     }
     cached.valid = false;
     return;
   }
 
-  // ROUTE_CHANGED: a genuine table mutation. Build ROUTE_UPDATE first (Part
-  // J), then the EVENT with real old-vs-new values, then update the cache.
-  float newScore = predictor::linkScore(evt.next_hop);
-  emitRouteUpdateFor(now, evt.destination, evt.next_hop, evt.hop_count, false);
+  // Reaches here for a genuine route change: either a real ROUTE_CHANGED
+  // table mutation, or a ROUTE_SELECTED that just proved a real
+  // health-driven change above. Both share identical "build ROUTE_UPDATE +
+  // EVENT from real old-vs-new state" handling — snapshot the OLD cached
+  // state first, since `cached` is overwritten at the end of this function.
+  bool hadOld = cached.valid;
+  NodeId oldNextHop = cached.nextHop;
+  uint8_t oldHopCount = cached.hopCount;
+  float oldScore = cached.score;
+  const char* oldHopsPath[NODE_ID_COUNT];
+  uint8_t oldHopsPathLen = cached.hopsPathLen;
+  for (uint8_t i = 0; i < oldHopsPathLen; i++) oldHopsPath[i] = cached.hopsPath[i];
 
-  if (hadOld && cached.nextHop != evt.next_hop) {
-    char details[192];
+  // Real, derivable reason (Finding 6): only a health-gated ROUTE_SELECTED
+  // change (the table itself is unchanged) can be legitimately attributed
+  // to link health at all — a genuine table mutation (ROUTE_CHANGED) could
+  // be caused by many things routing doesn't distinguish (topology change,
+  // neighbor restart, ...), so that always stays UNKNOWN, never guessed.
+  // Comparing real hop counts (never fabricated) tells degradation and
+  // recovery apart: moving onto a LONGER path means the previously
+  // preferred shorter one was excluded by health; moving onto a SHORTER
+  // one means a previously excluded path is preferred again.
+  telemetry_core::RouteReason reason = telemetry_core::RouteReason::UNKNOWN_R;
+  if (hadOld && evt.type == routing::RouteEventType::ROUTE_SELECTED) {
+    if (evt.hop_count > oldHopCount) {
+      reason = telemetry_core::RouteReason::LINK_DEGRADATION_R;
+    } else if (evt.hop_count < oldHopCount) {
+      reason = telemetry_core::RouteReason::ROUTE_RECOVERY_R;
+    }
+  }
+
+  float newScore = predictor::linkScore(evt.next_hop);
+  emitRouteUpdateFor(now, evt.destination, evt.next_hop, evt.hop_count, false, reason);
+
+  const char* newHopsPath[NODE_ID_COUNT];
+  uint8_t newHopsPathLen = reconstructHopsPath(evt.destination, evt.next_hop, evt.hop_count, newHopsPath, NODE_ID_COUNT);
+
+  if (hadOld && oldNextHop != evt.next_hop) {
+    char oldHopsJson[64];
+    char newHopsJson[64];
+    formatHopsJson(oldHopsJson, sizeof(oldHopsJson), oldHopsPath, oldHopsPathLen);
+    formatHopsJson(newHopsJson, sizeof(newHopsJson), newHopsPath, newHopsPathLen);
+    char details[256];
     snprintf(details, sizeof(details),
-             "{\"oldHops\":[\"%s\",\"%s\"],\"newHops\":[\"%s\",\"%s\"],\"reason\":\"UNKNOWN\",\"oldScore\":%.2f,\"newScore\":%.2f}",
-             thisNode().name, oldHop, thisNode().name, nodeName(evt.next_hop), oldScore, newScore);
+             "{\"oldHops\":%s,\"newHops\":%s,\"reason\":\"%s\",\"oldScore\":%.2f,\"newScore\":%.2f}",
+             oldHopsJson, newHopsJson, telemetry_core::routeReasonStr(reason), oldScore, newScore);
     emitEvent(now, "ROUTE_CHANGE", "INFO", thisNode().name, details);
   }
 
@@ -286,6 +376,8 @@ void onRouteEvent(const routing::RouteEvent& evt) {
   cached.nextHop = evt.next_hop;
   cached.hopCount = evt.hop_count;
   cached.score = newScore;
+  cached.hopsPathLen = newHopsPathLen;
+  for (uint8_t i = 0; i < newHopsPathLen; i++) cached.hopsPath[i] = newHopsPath[i];
 }
 
 void onLinkEvent(const predictor::LinkEvent& evt) {

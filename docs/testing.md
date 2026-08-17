@@ -5,6 +5,106 @@ nothing has been flashed yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 7.1 — red-team hardening pass (predictor/routing wording, ROUTE_UPDATE path reconstruction, route reason, HELLO MAC), actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs)
+
+### 1. Host tests (`routing_core::reconstructPath()` + `telemetry_core::RouteReason`/variable-length `RouteEntry`)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/routing/routing_core.cpp test_routing_core.cpp -o test_routing_core
+(clean compile, zero warnings)
+$ ./test_routing_core
+... (37 checks, see below)
+37/37 checks passed
+EXIT_CODE=0
+```
+
+7 new checks on top of Phase 1-5's existing 28: `reconstructPath()`
+correctly reconstructs both demo-relevant routes (`A→B→S`, `A→C→D→S`) and
+the direct priority path (`A→S`) as the unique real graph paths matching
+`routing_core`'s own already-computed hop count; refuses (returns 0) for
+a hop count with no matching real graph path; refuses for a genuine,
+independently-verified graph-level ambiguity (`B`'s own route to `D` via
+`A`, excluding `B` itself, admits two equal-length real paths — `A-C-D`
+and `A-S-D`); never revisits `self`; refuses out-of-range/undersized-buffer
+inputs.
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/telemetry/telemetry_core.cpp test_telemetry_core.cpp -o test_telemetry_core
+(clean compile, zero warnings)
+$ ./test_telemetry_core
+... (99 checks, see below)
+99/99 checks passed
+EXIT_CODE=0
+```
+
+5 new checks on top of Phase 6's existing 94: `ROUTE_UPDATE`'s `hopCount`
+is derived from `hops.length - 1` at serialization time — proven for a
+4-node/3-hop path, a 2-node/1-hop path, and a degenerate `hopsLen=0` input
+(confirming no `uint8_t` underflow to 255); the full `RouteReason` enum's
+string mapping (`PRIORITY_OVERRIDE`/`ROUTE_EXPIRED`/`LINK_DEGRADATION`/
+`ROUTE_RECOVERY`/`UNKNOWN`).
+
+Re-ran the full existing suite alongside both: `test_predictor_core`
+31/31, `test_anomaly_core` 50/50, `test_reliability_core` 88/88,
+`test_ucb1_core` 26/26, `test_apptraffic_core` 29/29 — **360/360 total,
+all seven host suites, actually run** (346 Phase-7 baseline + 14 new).
+
+**What this is not:** `telemetry.cpp`'s adapter-side changes
+(`onRouteEvent()`'s widened `ROUTE_SELECTED` handling,
+`reconstructHopsPath()`, the `CachedRoute` extension, `main.cpp`'s
+MAC-before-HELLO reordering) are untested by any host harness — same
+caveat as every prior phase's adapter half — reviewed by hand, validated
+by the real ESP32 compile below.
+
+### 2. Real ESP32 compilation — BOTH `ENABLE_UCB1` configurations
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=0 (default)
+Sketch uses 915928 bytes (69%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 48656 bytes (14%) of dynamic memory, leaving 279024 bytes for local variables. Maximum is 327680 bytes.
+```
+
+```
+# config.h temporarily edited to ENABLE_UCB1=1
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=1
+Sketch uses 918104 bytes (70%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 49056 bytes (14%) of dynamic memory, leaving 278624 bytes for local variables. Maximum is 327680 bytes.
+# config.h restored to ENABLE_UCB1=0 (required default) and re-verified — identical
+# byte counts to the first compile above (915928/48656), confirming an exact restore.
+```
+
+**Both configurations compiled clean on the first attempt — 0 errors, 0
+warnings, `esp32:esp32` core 3.3.11.** Flash grew by 848 bytes over Phase
+7's own `ENABLE_UCB1=0` figure (915080 -> 915928) — `reconstructPath()`'s
+graph search plus the widened `onRouteEvent()` logic; RAM grew by 120
+bytes (48536 -> 48656) — the `CachedRoute` struct's new `hopsPath`/
+`hopsPathLen` fields.
+
+### 3. GUI `routeKey()` verification (read, not modified)
+
+`gui-main/mesh-command-console.html`'s real, unmodified source was read
+directly (not a copy, not a harness this time — the function itself is one
+line): `function routeKey(hops){return Array.isArray(hops)?hops.join(''):''}`.
+A correctly-reconstructed `["A","B","S"]`/`["A","C","D","S"]`/`["A","S"]`
+therefore produces exactly `"ABS"`/`"ACDS"`/`"AS"` — the three literal
+strings the GUI's topology-diagram animation already recognized (see
+Phase 6's own GUI-parser-harness run below). This is real verification
+against the GUI's actual current code, not a prediction — but it is a
+narrower check than Phase 6's full Node.js harness run (which exercised
+`applyTelemetry()`/`trackFirmwareMeta()`/`renderFirmware()`/`setRoute()`
+end-to-end against real generated JSON); re-running that fuller harness
+against this specific fix is a reasonable follow-up before physical demo
+rehearsal, not done this pass (time-scoped decision, not an oversight).
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (all 7 suites) | **verified** — 360/360, see above |
+| ESP32 COMPILATION, `ENABLE_UCB1=0` (default) | **verified** — clean, 0 warnings, 0 errors |
+| ESP32 COMPILATION, `ENABLE_UCB1=1` | **verified** — clean, 0 warnings, 0 errors |
+| GUI `routeKey()` compatibility | **verified by source inspection** — real GUI code read directly, not the full Phase 6 harness re-run |
+| GUI (`gui-main/`) changes | **NONE** — `git diff --stat gui-main/` empty before and after |
+| PHYSICAL HARDWARE | **not yet verified** — no boards flashed yet; see "Hardware-dependent tests" below and `docs/known-issues.md`'s new Phase 7.1 section |
+
 ## Phase 7 — application traffic (`NODE_A` -> `NODE_S`), actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs)
 
 ### 1. Host tests (`apptraffic_core`'s send-decision + payload encode/decode logic)

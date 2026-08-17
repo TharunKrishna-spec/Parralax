@@ -147,40 +147,52 @@ enum-mapping/derivation decision. This section is kept (rather than
 deleted) as a historical record of the pre-Phase-6 gap and now records
 what's still genuinely open after implementation:
 
-**One real, demonstrated GUI-compatibility limitation, not fixed (per
-explicit instruction not to modify the GUI):** the console's
-topology-diagram animation only recognizes this exact demo topology's
-three known full-path route strings (`"ABS"`, `"ACDS"`, `"AS"`). Firmware's
-`ROUTE_UPDATE.hops` can only ever honestly report 2 elements
-(`[thisNode, nextHop]`) — distance-vector routing never learns a
-destination's full multi-hop path, only the next hop and total distance —
-so any real 2+-hop route produces a `routeKey` the GUI's hardcoded matcher
-doesn't recognize, and the topology diagram's animated path won't
-highlight for it (verified, not predicted — see
-[testing.md](testing.md)'s Phase 6 section). The underlying route data is
-still received and displayed correctly elsewhere (the "Route candidates"
-panel doesn't depend on `routeKey` matching). Resolving this for real
-would mean either a link-state protocol extension (out of scope, a genuine
-future design decision) or the GUI accepting a shorter/different route
-representation — a conversation with the GUI owner, not a firmware-side
-workaround.
+**RESOLVED, Phase 7.1, for both demo-relevant routes: the topology-diagram
+animation gap.** The console's topology-diagram animation only recognizes
+this exact demo topology's three known full-path route strings (`"ABS"`,
+`"ACDS"`, `"AS"`). `ROUTE_UPDATE.hops` previously could only ever honestly
+report 2 elements (`[thisNode, nextHop]`), so any real 2+-hop route
+produced a `routeKey` the GUI's hardcoded matcher didn't recognize. A
+red-team review pass found this fixable without touching the GUI or
+fabricating anything: `routing_core::reconstructPath()` (new, pure,
+read-only) searches the compiled-in static adjacency graph for the UNIQUE
+path matching `routing_core`'s own already-computed real hop count —
+provably correct for `A→B→S` and `A→C→D→S` (this topology's two demo
+routes), refusing to guess (returns nothing, honest 2-element fallback
+used instead) for the handful of other (self, destination) pairs where the
+graph is genuinely ambiguous. Verified against the GUI's real, unmodified
+`routeKey(hops){return hops.join('')}` source: a correctly reconstructed
+`["A","B","S"]`/`["A","C","D","S"]` now produces exactly `"ABS"`/`"ACDS"`
+— the GUI's own recognized strings. See
+[decisions.md](decisions.md#phase-71-red-team-pass--finding-5-route_update-hops-fixed--real-bounded-deterministic-path-reconstruction)
+and [gui-compatibility-matrix.md](gui-compatibility-matrix.md) for the
+full detail. Not yet re-verified through the full Phase 6 Node.js
+GUI-parser harness (that harness was disposable/scratchpad and wasn't
+rebuilt this pass — a reasonable follow-up before physical demo
+rehearsal); the fix itself is host-test-verified (`test_routing_core.cpp`)
+and confirmed via a real ESP32 compile.
 
 **Other honest limitations, all documented, none fabricated:**
 `ROUTE_UPDATE.score` reuses the next hop's own `link_score` (no multi-hop
 composite score exists anywhere in this codebase); `ROUTE_UPDATE.reason`
-reports `UNKNOWN` outside the priority/expiry cases `routing_core` can
-actually distinguish (5 of the contract's 8 `routeReason` values have no
-firmware source to report honestly); `STATISTICS.endToEndLatencyMs`
+reports `UNKNOWN` outside the priority/expiry/health-driven cases
+`routing_core`/`telemetry` can actually distinguish (as of Phase 7.1,
+`LINK_DEGRADATION`/`ROUTE_RECOVERY` are also real and derived from a real
+hop-count comparison — see decisions.md's Finding 6 entry; `STALE_NEIGHBOR`/
+`MANUAL` remain the only 2 of the contract's 8 `routeReason` values with no
+firmware source to report honestly, down from 5); `STATISTICS.endToEndLatencyMs`
 actually reports per-hop ACK latency, not a true multi-hop measurement (no
-such mechanism exists); `HELLO.mac` is omitted at boot until
-`transport::begin()` succeeds; `HELLO.config.ewmaAlpha` reports one of two
-real EWMA constants this project has (RSSI's, not PDR's); `NODE_JOIN`/
-`NODE_LEAVE` have no firmware event source at all (routing tracks
-liveness, but nothing distinguishes "first contact" from ordinary beacon
-traffic). UCB1 has no dedicated telemetry message (the frozen contract
-defines none, and Part 13 of this phase's instructions explicitly forbade
-inventing one) — its effect is already visible through `ROUTE_UPDATE`
-whenever `ENABLE_UCB1=1`.
+such mechanism exists); `HELLO.mac` is now populated in the very first
+HELLO (fixed Phase 7.1 — `WiFi.mode(WIFI_STA)`/`WiFi.macAddress()` moved
+ahead of `telemetry::init()`, since the real MAC doesn't structurally
+require the rest of `transport::begin()` to finish first); `HELLO.config.ewmaAlpha`
+reports one of two real EWMA constants this project has (RSSI's, not
+PDR's); `NODE_JOIN`/`NODE_LEAVE` have no firmware event source at all
+(routing tracks liveness, but nothing distinguishes "first contact" from
+ordinary beacon traffic). UCB1 has no dedicated telemetry message (the
+frozen contract defines none, and Part 13 of the Phase 6 instructions
+explicitly forbade inventing one) — its effect is already visible through
+`ROUTE_UPDATE` whenever `ENABLE_UCB1=1`.
 
 **`STATISTICS`'s counters are real but currently read their honest neutral
 defaults** (`pdr:1.0`, all packet counts `0`) on any fresh boot, because no
@@ -324,9 +336,10 @@ a substitute for the real thing:
       115200 baud, not just generated by a host program
 - [ ] The GUI's real "Connect Hardware" (WebSerial) or "Connect via Bridge"
       path successfully parses live firmware output end-to-end
-- [ ] `HELLO.mac` populated with a real MAC once `transport::begin()`
-      succeeds on real hardware (currently omitted at boot — honest, not a
-      bug, but unverified in practice)
+- [ ] `HELLO.mac` observed carrying a real MAC in the first HELLO on real
+      hardware (code-level fix landed Phase 7.1 — `WiFi.macAddress()` is
+      now read before `telemetry::init()`; genuinely unverified on real
+      silicon until flashed)
 - [ ] Telemetry emission volume (6 periodic message types + event-driven
       ones) confirmed not to overwhelm a real 115200-baud UART or the
       GUI's own parsing loop at real sustained rates
@@ -364,6 +377,34 @@ the real thing:
       the firmware (undetermined — not assumed either way, see
       decisions.md) — if not, the priority trigger requires a direct
       terminal connection to `NODE_A`, not just the GUI
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file.
+
+## Phase 7.1 red-team fixes (ROUTE_UPDATE path reconstruction, route reason, HELLO MAC) — not yet run on hardware
+
+`routing_core::reconstructPath()` (new), the widened `onRouteEvent()`
+health-driven-reroute detection, and the `WiFi.mode(WIFI_STA)`-before-
+`telemetry::init()` reordering are verified two ways: host-compiled,
+actually-executed unit test suites (`test_routing_core.cpp` 37/37 including
+7 new `reconstructPath()` checks, `test_telemetry_core.cpp` 99/99 including
+5 new `RouteReason` checks — see `docs/testing.md`) and a real
+`arduino-cli` compile of the whole sketch in both `ENABLE_UCB1`
+configurations. Neither is a substitute for the real thing:
+
+- [ ] A real health-driven reroute (Faraday-bag B, per the guide's own
+      §06 demo) is observed producing a real `ROUTE_UPDATE`/`ROUTE_CHANGE`
+      with `hops:["A","C","D","S"]`, `hopCount:3`, `reason:"LINK_DEGRADATION"`
+      — the exact scenario this fix exists for, genuinely untested until
+      real hardware exists to degrade a real link on
+- [ ] The GUI's real topology-diagram animation is observed actually
+      highlighting the `A-C-D-S` backup path once that `ROUTE_UPDATE`
+      arrives over a real Serial connection (verified so far only by
+      reading the GUI's real, unmodified `routeKey()` source — not by
+      running the full Phase 6 GUI-parser harness against this specific
+      fix, and not over real hardware)
+- [ ] `HELLO.mac` observed carrying the real MAC on actual first boot
+      (code fix verified by ESP32 compile only, not real Serial output)
 
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
 this file.

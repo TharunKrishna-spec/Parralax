@@ -2,6 +2,55 @@
 
 namespace routing_core {
 
+namespace {
+
+// Exhaustive-but-tiny (<=5 nodes) DFS over the static neighborsOf() graph,
+// counting every distinct loop-free path from `current` to `destination`
+// with exactly `remainingHops` edges left. Stops early once a second match
+// is found (matchCount > 1) — ambiguity is already proven at that point,
+// no need to keep searching. `visited` is shared/backtracked so `self` and
+// every node already placed on the in-progress path is correctly excluded
+// from being revisited, which is what makes a real graph-level cycle
+// resolve to a unique answer once `self` is fixed (see docs/decisions.md).
+struct PathSearch {
+  NodeId path[NODE_ID_COUNT];
+  uint8_t pathLen;
+  bool visited[NODE_ID_COUNT];
+  NodeId foundPath[NODE_ID_COUNT];
+  uint8_t foundLen;
+  uint8_t matchCount;
+};
+
+void searchPaths(PathSearch& s, NodeId current, NodeId destination, uint8_t remainingHops) {
+  if (s.matchCount > 1) return;
+
+  if (remainingHops == 0) {
+    if (current == destination) {
+      s.matchCount++;
+      if (s.matchCount == 1) {
+        s.foundLen = s.pathLen;
+        for (uint8_t i = 0; i < s.pathLen; i++) s.foundPath[i] = s.path[i];
+      }
+    }
+    return;
+  }
+  if (current == destination) return;  // arrived too early — not a path of exactly this length
+
+  uint8_t count = 0;
+  const NodeId* neighbors = neighborsOf(current, count);
+  for (uint8_t i = 0; i < count && s.matchCount <= 1; i++) {
+    NodeId next = neighbors[i];
+    if (next >= NODE_ID_COUNT || s.visited[next]) continue;
+    s.visited[next] = true;
+    s.path[s.pathLen++] = next;
+    searchPaths(s, next, destination, static_cast<uint8_t>(remainingHops - 1));
+    s.pathLen--;
+    s.visited[next] = false;
+  }
+}
+
+}  // namespace
+
 void init(RoutingState& state, NodeId self) {
   state.self = self;
   for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
@@ -175,6 +224,29 @@ uint8_t enumerateCandidates(const RoutingState& state, NodeId destination,
     n++;
   }
   return n;
+}
+
+uint8_t reconstructPath(NodeId self, NodeId destination, NodeId via, uint8_t hopCount, NodeId* out, uint8_t maxOut) {
+  if (self >= NODE_ID_COUNT || destination >= NODE_ID_COUNT || via >= NODE_ID_COUNT) return 0;
+  if (hopCount == 0 || hopCount > NODE_ID_COUNT - 1) return 0;  // bounded: no real loop-free path in a 5-node graph exceeds 4 edges
+  if (maxOut < static_cast<uint8_t>(hopCount + 1)) return 0;
+
+  PathSearch s{};
+  for (uint8_t i = 0; i < NODE_ID_COUNT; i++) s.visited[i] = false;
+  s.visited[self] = true;
+  s.visited[via] = true;
+  s.path[0] = via;
+  s.pathLen = 1;
+  s.foundLen = 0;
+  s.matchCount = 0;
+
+  searchPaths(s, via, destination, static_cast<uint8_t>(hopCount - 1));
+
+  if (s.matchCount != 1) return 0;  // no real path of this length, or genuinely ambiguous — never guess
+
+  out[0] = self;
+  for (uint8_t i = 0; i < s.foundLen; i++) out[i + 1] = s.foundPath[i];
+  return static_cast<uint8_t>(s.foundLen + 1);
 }
 
 }  // namespace routing_core

@@ -157,4 +157,34 @@ uint8_t enumerateCandidates(const RoutingState& state, NodeId destination,
                              const bool* neighborUnhealthy, NodeId excludeNextHop,
                              CandidateInfo* out, uint8_t maxOut);
 
+// ============================================================
+// Phase 7.1 (red-team finding: GUI contract's ROUTE_UPDATE.hops must be an
+// ordered full path, with hopCount == hops.length-1 — a real, provable
+// invariant firmware was violating by reporting only [self, nextHop] next
+// to the real, longer routing_core hop count). Purely additive, read-only,
+// stateless (no RoutingState needed) — for TELEMETRY REPORTING ONLY. Never
+// called by, and never influences, selectNextHop()/getNextHop()/any
+// routing decision. See docs/decisions.md.
+// ============================================================
+
+// Attempts to reconstruct the full node sequence from `self` to
+// `destination` via direct neighbor `via`, given a real `hopCount`
+// routing_core already computed for that (destination, via) candidate.
+// Searches ONLY the fixed, compiled-in static adjacency graph
+// (core/node_id.h::neighborsOf() — real structural data every node's
+// firmware already has, identical on all five boards, not fabricated) for
+// a loop-free path of EXACTLY `hopCount` edges from `via` to `destination`
+// that never revisits `self` (a real simple path can never pass back
+// through its own origin). Writes `[self, via, ..., destination]` into
+// `out` (length hopCount+1) and returns that length ONLY when such a path
+// exists AND is the UNIQUE one the static graph admits at that exact
+// length — if the graph allows zero or more than one distinct path of
+// that length (a real possibility for some (self, destination) pairs in
+// this topology — see docs/decisions.md), this returns 0 rather than ever
+// guessing which one actually carried the traffic. Bounded by `maxOut`
+// (must be >= 2) and by NODE_ID_COUNT — a real loop-free path can never
+// have more nodes than exist in the whole topology.
+uint8_t reconstructPath(NodeId self, NodeId destination, NodeId via, uint8_t hopCount,
+                         NodeId* out, uint8_t maxOut);
+
 }  // namespace routing_core

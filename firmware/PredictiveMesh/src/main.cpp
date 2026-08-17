@@ -142,13 +142,21 @@ void setup() {
   logger::info("UCB1 adaptive routing: %s", ENABLE_UCB1 ? "ENABLED" : "disabled (default)");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
-  // Telemetry initializes before transport so a bootId/HELLO exist before
-  // anything that could fail (Part J) - the real MAC genuinely isn't known
-  // yet at this point (WiFi.macAddress() needs transport::begin() to have
-  // at least set WiFi mode first, matching the existing code below), so
-  // HELLO's optional `mac` field is honestly omitted here rather than
-  // delayed. See docs/decisions.md.
-  telemetry::init(nullptr);
+  // Phase 7.1 (red-team Finding 4): the real MAC IS available this early —
+  // WiFi.macAddress() reads the hardware-burned efuse MAC, valid as soon as
+  // WiFi.mode(WIFI_STA) has been called, which esp_now_init()/channel-set
+  // do NOT need to have happened first (confirmed by inspecting
+  // transport::begin(), which itself calls WiFi.mode(WIFI_STA) as its own
+  // very first statement — see espnow_transport.cpp). Calling it here too
+  // is redundant but harmless (idempotent), and lets telemetry::init()
+  // still run before anything that could genuinely fail (esp_wifi_set_channel/
+  // esp_now_init, both still ahead in transport::begin()) — Part J's original
+  // ordering goal — while the first real HELLO now honestly carries the
+  // real MAC instead of omitting it. See docs/decisions.md.
+  WiFi.mode(WIFI_STA);
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  telemetry::init(mac);
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
   if (status != transport::Status::OK) {
@@ -159,11 +167,9 @@ void setup() {
     }
   }
 
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
   char macStr[18];
   logger::macToStr(mac, macStr);
-  logger::info("Own MAC address: %s (record this in core/node_id.h's NODE_TABLE once hardware exists)", macStr);
+  logger::info("Own MAC address: %s (verify this matches core/node_id.h's NODE_TABLE entry for this node)", macStr);
 
   transport::addBroadcastPeer();
   registerConfiguredPeers();

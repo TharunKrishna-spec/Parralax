@@ -347,15 +347,21 @@
 // existing spec (see docs/decisions.md — this whole module resolves a gap
 // Phase 4 explicitly declined to guess at) - a starting/placeholder
 // figure, chosen deliberately relative to timing this project has already
-// established rather than picked arbitrarily: comfortably above one
-// hop-transmission's own worst-case retry window
-// ((1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS = 800ms), so
-// in the common case a new send never overlaps the previous series' own
-// retries; well under a level that would compete for airtime with
-// ROUTING_HELLO_INTERVAL_MS's (1000ms) beacon traffic every single cycle;
-// and still frequent enough to give PREDICTOR_PDR_EWMA_ALPHA's ~20-sample
-// window, and the GUI's STATISTICS panel, real, visibly-moving numbers
-// over a multi-minute demo. See docs/decisions.md.
+// established rather than picked arbitrarily:
+//  - Comfortably ABOVE one hop-transmission's own worst-case retry window
+//    ((1 + RELIABILITY_MAX_RETRIES) * RELIABILITY_ACK_TIMEOUT_MS = 800ms),
+//    so in the common case a new send never overlaps the previous series'
+//    own retries.
+//  - Exactly 2x ROUTING_HELLO_INTERVAL_MS's (1000ms) beacon interval — NOT
+//    "below" it (2000ms > 1000ms, a real numeric fact worth stating
+//    plainly after an earlier draft of this reasoning phrased it in a way
+//    that read as internally inconsistent — see docs/decisions.md) —
+//    meaning application traffic adds at most one extra transmission for
+//    every TWO beacon cycles, never a competing send on literally every
+//    single beacon cycle.
+//  - Still frequent enough to give PREDICTOR_PDR_EWMA_ALPHA's ~20-sample
+//    window, and the GUI's STATISTICS panel, real, visibly-moving numbers
+//    over a multi-minute demo. See docs/decisions.md.
 #define APPLICATION_TX_INTERVAL_MS 2000
 
 // ============================================================

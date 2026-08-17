@@ -55,6 +55,25 @@ void wEnvelopeOpen(Writer& w, const Envelope& env, const char* type) {
           static_cast<unsigned long>(env.timestampMs));
 }
 
+// Writes a JSON string array of `len` canonical node-letter strings —
+// shared by ROUTE_UPDATE's `active.hops`/`candidates[].hops` (Phase 7.1,
+// red-team Finding 5) so both use exactly the same array-formatting logic.
+void wHopsArray(Writer& w, const char* const* hops, uint8_t len) {
+  wPrintf(w, "[");
+  for (uint8_t i = 0; i < len; i++) {
+    wPrintf(w, "%s\"%s\"", i == 0 ? "" : ",", orEmpty(hops[i]));
+  }
+  wPrintf(w, "]");
+}
+
+// hopCount is deliberately derived here, never accepted as a separately-
+// trusted field — see telemetry_core.h's RouteEntry comment for why this
+// is what makes the contract's `hopCount == hops.length - 1` invariant
+// impossible to violate by construction.
+uint8_t derivedHopCount(uint8_t hopsLen) {
+  return hopsLen > 0 ? static_cast<uint8_t>(hopsLen - 1) : 0;
+}
+
 size_t finish(Writer& w) {
   if (!w.ok) return 0;
   wPrintf(w, "}");  // closes the envelope object opened by wEnvelopeOpen
@@ -113,10 +132,15 @@ const char* roleStr(NodeRole role) {
   }
 }
 
-const char* routeReasonStr(bool priority, bool invalidated) {
-  if (priority) return "PRIORITY_OVERRIDE";
-  if (invalidated) return "ROUTE_EXPIRED";
-  return "UNKNOWN";
+const char* routeReasonStr(RouteReason reason) {
+  switch (reason) {
+    case RouteReason::PRIORITY_OVERRIDE_R: return "PRIORITY_OVERRIDE";
+    case RouteReason::ROUTE_EXPIRED_R:     return "ROUTE_EXPIRED";
+    case RouteReason::LINK_DEGRADATION_R:  return "LINK_DEGRADATION";
+    case RouteReason::ROUTE_RECOVERY_R:    return "ROUTE_RECOVERY";
+    case RouteReason::UNKNOWN_R:           return "UNKNOWN";
+    default:                                return "UNKNOWN";
+  }
 }
 
 const char* sensorHealthStr(uint8_t anomalySensorState) {
@@ -195,14 +219,16 @@ size_t buildRouteUpdate(const Envelope& env, const RouteUpdatePayload& p, char* 
   Writer w;
   wInit(w, buf, bufSize);
   wEnvelopeOpen(w, env, "ROUTE_UPDATE");
-  wPrintf(w, "{\"destination\":\"%s\",\"active\":{\"hops\":[\"%s\",\"%s\"],\"hopCount\":%u,\"score\":%.2f,"
-             "\"state\":\"%s\"},\"candidates\":[",
-          orEmpty(p.destination), orEmpty(p.active.hops[0]), orEmpty(p.active.hops[1]),
-          static_cast<unsigned>(p.active.hopCount), p.active.score, orEmpty(p.active.state));
+  wPrintf(w, "{\"destination\":\"%s\",\"active\":{\"hops\":", orEmpty(p.destination));
+  wHopsArray(w, p.active.hops, p.active.hopsLen);
+  wPrintf(w, ",\"hopCount\":%u,\"score\":%.2f,\"state\":\"%s\"},\"candidates\":[",
+          static_cast<unsigned>(derivedHopCount(p.active.hopsLen)), p.active.score, orEmpty(p.active.state));
   for (uint8_t i = 0; i < p.candidateCount; i++) {
     const RouteEntry& c = p.candidates[i];
-    wPrintf(w, "%s{\"hops\":[\"%s\",\"%s\"],\"hopCount\":%u,\"score\":%.2f,\"state\":\"%s\"}", i == 0 ? "" : ",",
-            orEmpty(c.hops[0]), orEmpty(c.hops[1]), static_cast<unsigned>(c.hopCount), c.score, orEmpty(c.state));
+    wPrintf(w, "%s{\"hops\":", i == 0 ? "" : ",");
+    wHopsArray(w, c.hops, c.hopsLen);
+    wPrintf(w, ",\"hopCount\":%u,\"score\":%.2f,\"state\":\"%s\"}",
+            static_cast<unsigned>(derivedHopCount(c.hopsLen)), c.score, orEmpty(c.state));
   }
   wPrintf(w, "],\"trafficClass\":\"%s\",\"reason\":\"%s\"}", orEmpty(p.trafficClass), orEmpty(p.reason));
   return finish(w);

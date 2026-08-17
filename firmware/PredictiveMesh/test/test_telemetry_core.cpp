@@ -149,8 +149,8 @@ void test_link_update_fields() {
 void test_route_update_with_and_without_candidates() {
   char buf[LINE_BUF_SIZE];
   RouteEntry candidates[2];
-  candidates[0] = RouteEntry{ { "A", "B" }, 2, 0.82f, "ACTIVE" };
-  candidates[1] = RouteEntry{ { "A", "C" }, 3, 0.91f, "BACKUP" };
+  candidates[0] = RouteEntry{ { "A", "B", "S" }, 3, 0.82f, "ACTIVE" };        // real 3-node path, 2 hops
+  candidates[1] = RouteEntry{ { "A", "C", "D", "S" }, 4, 0.91f, "BACKUP" };   // real 4-node path, 3 hops
 
   RouteUpdatePayload p{};
   p.destination = "S";
@@ -163,9 +163,12 @@ void test_route_update_with_and_without_candidates() {
   size_t n = buildRouteUpdate(testEnvelope(), p, buf, sizeof(buf));
   check(n > 0, "buildRouteUpdate succeeds with two candidates");
   check(contains(buf, "\"destination\":\"S\""), "ROUTE_UPDATE reports the correct destination");
-  check(contains(buf, "\"active\":{\"hops\":[\"A\",\"B\"]"), "ROUTE_UPDATE's active route carries the real 2-element hops known locally");
+  check(contains(buf, "\"active\":{\"hops\":[\"A\",\"B\",\"S\"]"),
+        "ROUTE_UPDATE's active route carries the full reconstructed 3-node path, not just [self,nextHop]");
   check(contains(buf, "\"candidates\":[{"), "ROUTE_UPDATE's candidates array is populated when candidates exist");
-  check(contains(buf, "\"hopCount\":3"), "ROUTE_UPDATE preserves each candidate's own real routing_core hop count");
+  check(contains(buf, "\"hops\":[\"A\",\"C\",\"D\",\"S\"]"), "a longer (3-hop, 4-node) candidate carries its own full real path");
+  check(contains(buf, "\"hopCount\":3"), "hopCount is derived from the 4-node backup path's real length (4-1=3), matching routing_core's own distance");
+  check(contains(buf, "\"hopCount\":2"), "hopCount is derived from the 3-node active path's real length (3-1=2)");
   check(balanced(buf), "ROUTE_UPDATE (2 candidates) line is structurally balanced");
 
   p.candidateCount = 0;
@@ -173,6 +176,36 @@ void test_route_update_with_and_without_candidates() {
   check(n > 0, "buildRouteUpdate succeeds with zero candidates");
   check(contains(buf, "\"candidates\":[]"), "ROUTE_UPDATE emits a valid empty array, not a malformed comma, when there are no candidates");
   check(balanced(buf), "ROUTE_UPDATE (0 candidates) line is structurally balanced");
+}
+
+// ---- Phase 7.1 (red-team Finding 5): hopCount == hops.length-1 always holds, by construction ----
+void test_route_update_hop_count_always_derived_from_hops_length() {
+  char buf[LINE_BUF_SIZE];
+
+  // The direct 1-hop priority path: 2-node hops, hopCount must be 1.
+  RouteEntry direct{ { "A", "S" }, 2, 0.95f, "ACTIVE" };
+  RouteUpdatePayload p{};
+  p.destination = "S";
+  p.active = direct;
+  p.candidates = nullptr;
+  p.candidateCount = 0;
+  p.trafficClass = "PRIORITY";
+  p.reason = "PRIORITY_OVERRIDE";
+  size_t n = buildRouteUpdate(testEnvelope(), p, buf, sizeof(buf));
+  check(n > 0 && contains(buf, "\"hops\":[\"A\",\"S\"]") && contains(buf, "\"hopCount\":1"),
+        "a real 2-node direct path derives hopCount=1 — hopCount never exceeds hops.length-1 (the exact "
+        "inconsistency a red-team review flagged: hops=[A,C],hopCount=3 would violate the GUI contract's "
+        "own stated hopCount==hops.length-1 invariant)");
+
+  // Degenerate hopsLen=0 must not underflow hopCount to 255.
+  RouteEntry empty{};
+  empty.hopsLen = 0;
+  empty.score = 0.0f;
+  empty.state = "ACTIVE";
+  p.active = empty;
+  n = buildRouteUpdate(testEnvelope(), p, buf, sizeof(buf));
+  check(n > 0 && contains(buf, "\"hopCount\":0") && !contains(buf, "\"hopCount\":255"),
+        "hopsLen=0 (degenerate/never expected in practice) derives hopCount=0, not a uint8_t underflow to 255");
 }
 
 // ---- 0x06 PREDICTION ----
@@ -324,11 +357,18 @@ void test_sensor_health_mapping_covers_every_state() {
 }
 
 void test_route_reason_mapping() {
-  check(std::strcmp(routeReasonStr(true, false), "PRIORITY_OVERRIDE") == 0, "a priority decision always maps to PRIORITY_OVERRIDE, regardless of invalidation");
-  check(std::strcmp(routeReasonStr(true, true), "PRIORITY_OVERRIDE") == 0, "priority takes precedence over the invalidated flag");
-  check(std::strcmp(routeReasonStr(false, true), "ROUTE_EXPIRED") == 0, "a non-priority invalidated route maps to ROUTE_EXPIRED");
-  check(std::strcmp(routeReasonStr(false, false), "UNKNOWN") == 0,
-        "a non-priority, non-invalidated change maps to UNKNOWN — routing_core has no finer-grained reason to report honestly (see docs/decisions.md)");
+  check(std::strcmp(routeReasonStr(RouteReason::PRIORITY_OVERRIDE_R), "PRIORITY_OVERRIDE") == 0,
+        "a priority-forced route maps to PRIORITY_OVERRIDE");
+  check(std::strcmp(routeReasonStr(RouteReason::ROUTE_EXPIRED_R), "ROUTE_EXPIRED") == 0,
+        "a staleness-expired route maps to ROUTE_EXPIRED");
+  check(std::strcmp(routeReasonStr(RouteReason::LINK_DEGRADATION_R), "LINK_DEGRADATION") == 0,
+        "a health-gated reroute onto a longer path maps to LINK_DEGRADATION (Phase 7.1 red-team Finding 6 — "
+        "derived from a real hop-count comparison, never fabricated)");
+  check(std::strcmp(routeReasonStr(RouteReason::ROUTE_RECOVERY_R), "ROUTE_RECOVERY") == 0,
+        "a health-gated reroute back onto a shorter path maps to ROUTE_RECOVERY");
+  check(std::strcmp(routeReasonStr(RouteReason::UNKNOWN_R), "UNKNOWN") == 0,
+        "a table-mutation-driven change (ROUTE_CHANGED) maps to UNKNOWN — routing doesn't know why a "
+        "neighbor's advertisement changed, and this project never invents a cause it can't prove (see docs/decisions.md)");
 }
 
 }  // namespace
@@ -339,6 +379,7 @@ int main() {
   test_node_status_optional_reason();
   test_link_update_fields();
   test_route_update_with_and_without_candidates();
+  test_route_update_hop_count_always_derived_from_hops_length();
   test_prediction_fields();
   test_sensor_status_optional_fields();
   test_event_details_passthrough();
