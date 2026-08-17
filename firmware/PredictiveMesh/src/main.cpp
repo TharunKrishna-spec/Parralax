@@ -1,0 +1,124 @@
+#include "main.h"
+#include "config.h"
+#include "core/logger.h"
+#include "core/node_id.h"
+#include "core/packet.h"
+#include "transport/espnow_transport.h"
+#include "routing/routing.h"
+#include "predictor/predictor.h"
+#include "anomaly/anomaly.h"
+#include "reliability/reliability.h"
+#include "telemetry/telemetry.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <string.h>
+
+namespace {
+
+uint32_t g_lastAliveLog = 0;
+
+// Transport already logs every [RX]/[TX] line itself (see
+// espnow_transport.cpp); this hook's job is to turn a raw received frame
+// into a MeshPacket and hand it to routing. Never pointer-cast evt.data
+// directly (see core/packet.h) - memcpy into a locally declared,
+// compiler-aligned MeshPacket first.
+void onTransportRx(const transport::RxEvent& evt) {
+  if (evt.len < PACKET_HEADER_SIZE) return;  // too short to be a MeshPacket, ignore
+
+  MeshPacket pkt;
+  size_t copyLen = evt.len < sizeof(MeshPacket) ? evt.len : sizeof(MeshPacket);
+  memcpy(&pkt, evt.data, copyLen);
+
+  routing::onPacketReceived(pkt, evt.rssi);
+}
+
+void onTransportTx(const transport::TxEvent& evt) {
+  (void)evt;
+}
+
+// Phase 1's route-change/invalidation event stream - logged for now.
+// Later phases (predictor-triggered rerouting, telemetry/dashboard)
+// subscribe to the same routing::setEventCallback() instead of adding a
+// new hook here.
+void onRouteEvent(const routing::RouteEvent& evt) {
+  const char* typeStr =
+      evt.type == routing::RouteEventType::ROUTE_SELECTED    ? "SELECTED"
+      : evt.type == routing::RouteEventType::ROUTE_CHANGED   ? "CHANGED"
+                                                               : "INVALIDATED";
+  logger::debug("[ROUTE-EVENT] %s dst=%s next=%s hops=%u priority=%d", typeStr,
+                nodeName(evt.destination),
+                evt.next_hop == NODE_ID_UNKNOWN ? "NONE" : nodeName(evt.next_hop),
+                static_cast<unsigned>(evt.hop_count), evt.priority ? 1 : 0);
+}
+
+// Registers ESP-NOW peers for this node's direct topology neighbors (see
+// neighborsOf() in core/node_id.h), skipping any whose MAC hasn't been
+// filled in yet. Real MACs don't exist until hardware is flashed — see
+// docs/known-issues.md.
+void registerConfiguredPeers() {
+  uint8_t count = 0;
+  const NodeId* neighbors = neighborsOf(THIS_NODE_ID, count);
+  static const uint8_t zeroMac[6] = { 0, 0, 0, 0, 0, 0 };
+
+  for (uint8_t i = 0; i < count; i++) {
+    const NodeInfo& n = nodeInfo(neighbors[i]);
+    if (memcmp(n.mac, zeroMac, 6) == 0) {
+      logger::warn("Peer MAC not yet configured for node %s - see docs/known-issues.md", n.name);
+      continue;
+    }
+    transport::addPeer(n.mac);
+  }
+}
+
+}  // namespace
+
+namespace app {
+
+void setup() {
+  logger::begin(SERIAL_BAUD_RATE);
+  logger::info("========================================");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 1 firmware");
+  logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
+
+  transport::Status status = transport::begin(onTransportRx, onTransportTx);
+  if (status != transport::Status::OK) {
+    logger::error("Transport init failed (code=%d) - halting", static_cast<int>(status));
+    while (true) {
+      delay(1000);  // Phase 0: no recovery strategy yet, fail loud and stop
+    }
+  }
+
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char macStr[18];
+  logger::macToStr(mac, macStr);
+  logger::info("Own MAC address: %s (record this in core/node_id.h's NODE_TABLE once hardware exists)", macStr);
+
+  transport::addBroadcastPeer();
+  registerConfiguredPeers();
+
+  routing::init();
+  routing::setEventCallback(onRouteEvent);
+  predictor::init();
+  anomaly::init();
+  reliability::init();
+  telemetry::init();
+
+  logger::info("Phase 1 firmware ready - entering main loop");
+}
+
+void loop() {
+  uint32_t now = millis();
+  if (now - g_lastAliveLog >= 5000) {
+    g_lastAliveLog = now;
+    logger::debug("alive uptime_ms=%lu free_heap=%u", static_cast<unsigned long>(now),
+                  static_cast<unsigned>(ESP.getFreeHeap()));
+  }
+
+  routing::tick();
+
+  delay(10);
+}
+
+}  // namespace app

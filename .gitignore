@@ -1,0 +1,9 @@
+# Host-compiled test harness build output (firmware/PredictiveMesh/test/)
+*.exe
+*.o
+*.out
+
+# Arduino CLI build output, if compiled in-place
+build/
+*.bin
+*.elf

@@ -1,0 +1,1299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Predictive Self-Healing IoT Mesh — Implementation Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FAFAF6;
+    --surface:#FFFFFF;
+    --ink:#171B20;
+    --ink-soft:#565F69;
+    --ink-faint:#8B93A0;
+    --line:#E4E0D3;
+    --line-soft:#EDEAE0;
+    --blue:#2454C7;
+    --blue-soft:#EBF0FC;
+    --blue-line:#B9C9F2;
+    --copper:#B5652A;
+    --copper-soft:#F8ECDF;
+    --copper-line:#E7CBA8;
+    --green:#2E8B57;
+    --green-soft:#E7F4EC;
+    --amber:#A9760B;
+    --amber-soft:#FBF2DC;
+    --red:#C1432E;
+    --red-soft:#FBEAE6;
+    --font-display:'Space Grotesk',ui-sans-serif,sans-serif;
+    --font-body:'IBM Plex Sans',ui-sans-serif,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--font-body);
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:920px;margin:0 auto;padding:0 28px 120px;}
+
+  /* ---------- top nav ---------- */
+  .topnav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(250,250,246,0.92);
+    backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line);
+  }
+  .topnav-inner{
+    max-width:920px;margin:0 auto;padding:0 28px;
+    display:flex;gap:2px;overflow-x:auto;
+    scrollbar-width:none;
+  }
+  .topnav-inner::-webkit-scrollbar{display:none;}
+  .topnav a{
+    flex:none;
+    font-family:var(--font-mono);
+    font-size:11.5px;letter-spacing:.02em;
+    color:var(--ink-soft);text-decoration:none;
+    padding:12px 10px;white-space:nowrap;
+    border-bottom:2px solid transparent;
+  }
+  .topnav a:hover{color:var(--blue);border-bottom-color:var(--blue-line);}
+
+  /* ---------- hero ---------- */
+  .hero{
+    padding:64px 0 40px;
+    background-image:
+      linear-gradient(var(--line-soft) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+    background-size:28px 28px;
+    background-position:center top;
+    border-bottom:1px solid var(--line);
+  }
+  .eyebrow{
+    font-family:var(--font-mono);font-size:12px;color:var(--blue);
+    letter-spacing:.08em;text-transform:uppercase;margin:0 0 14px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .eyebrow::before{content:"";width:7px;height:7px;background:var(--blue);border-radius:1px;display:inline-block;}
+  h1.title{
+    font-family:var(--font-display);font-weight:700;
+    font-size:clamp(28px,4.4vw,44px);line-height:1.08;
+    margin:0 0 16px;letter-spacing:-0.01em;
+  }
+  .subtitle{font-size:17px;color:var(--ink-soft);max-width:640px;margin:0 0 30px;}
+  .hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:34px;}
+  .chip{
+    font-family:var(--font-mono);font-size:11.5px;color:var(--ink-soft);
+    background:var(--surface);border:1px solid var(--line);border-radius:20px;
+    padding:5px 12px;
+  }
+  .hero-diagram{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 6px 4px;}
+  .hero-diagram figcaption{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-faint);text-align:center;padding:8px 0 4px;}
+
+  /* ---------- sections ---------- */
+  section{padding:56px 0;border-bottom:1px solid var(--line);}
+  section:last-of-type{border-bottom:none;}
+  .section-head{display:flex;align-items:baseline;gap:14px;margin-bottom:6px;}
+  .section-num{font-family:var(--font-mono);font-size:13px;color:var(--blue);font-weight:600;}
+  h2{
+    font-family:var(--font-display);font-weight:600;font-size:26px;
+    margin:0;letter-spacing:-.01em;
+  }
+  .section-dek{color:var(--ink-soft);max-width:680px;margin:10px 0 30px;font-size:15px;}
+  h3{font-family:var(--font-display);font-weight:600;font-size:18px;margin:34px 0 12px;}
+  h4{font-family:var(--font-body);font-weight:600;font-size:14.5px;margin:24px 0 10px;color:var(--ink);}
+  p{margin:0 0 14px;}
+  ul,ol{margin:0 0 16px;padding-left:22px;}
+  li{margin-bottom:6px;}
+  strong{font-weight:600;}
+  code{
+    font-family:var(--font-mono);font-size:.88em;background:var(--line-soft);
+    padding:1px 5px;border-radius:4px;color:var(--ink);
+  }
+  a{color:var(--blue);}
+
+  /* ---------- callouts ---------- */
+  .callout{
+    border-radius:8px;padding:14px 16px;margin:18px 0;
+    font-size:14.5px;border:1px solid;
+  }
+  .callout-title{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;margin-bottom:5px;display:block;}
+  .callout.hw{background:var(--copper-soft);border-color:var(--copper-line);}
+  .callout.hw .callout-title{color:var(--copper);}
+  .callout.sw{background:var(--blue-soft);border-color:var(--blue-line);}
+  .callout.sw .callout-title{color:var(--blue);}
+  .callout.warn{background:var(--amber-soft);border-color:#E9D69B;}
+  .callout.warn .callout-title{color:var(--amber);}
+  .callout.danger{background:var(--red-soft);border-color:#EFC3B8;}
+  .callout.danger .callout-title{color:var(--red);}
+
+  /* ---------- track labels ---------- */
+  .track{
+    display:inline-flex;align-items:center;gap:6px;
+    font-family:var(--font-mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+    padding:3px 9px;border-radius:20px;font-weight:600;
+  }
+  .track.hw{background:var(--copper-soft);color:var(--copper);}
+  .track.sw{background:var(--blue-soft);color:var(--blue);}
+  .track.both{background:var(--line-soft);color:var(--ink-soft);}
+
+  /* ---------- tables ---------- */
+  .table-wrap{overflow-x:auto;margin:16px 0 26px;border:1px solid var(--line);border-radius:10px;}
+  table{width:100%;border-collapse:collapse;font-size:13.6px;background:var(--surface);}
+  caption{caption-side:top;text-align:left;font-family:var(--font-mono);font-size:11px;color:var(--ink-faint);padding:10px 14px 0;}
+  th{
+    text-align:left;font-family:var(--font-mono);font-weight:600;font-size:11.5px;
+    letter-spacing:.03em;text-transform:uppercase;color:var(--ink-soft);
+    background:var(--line-soft);padding:10px 14px;border-bottom:1px solid var(--line);
+    white-space:nowrap;
+  }
+  td{padding:10px 14px;border-bottom:1px solid var(--line-soft);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td.mono, th.mono{font-family:var(--font-mono);}
+  td.pin{font-family:var(--font-mono);font-weight:600;color:var(--copper);white-space:nowrap;}
+  td.center{text-align:center;}
+  tr.hl td{background:var(--blue-soft);}
+
+  /* ---------- pseudocode ---------- */
+  .code-block{
+    background:#14171C;color:#E7E9EE;border-radius:10px;
+    padding:16px 18px;overflow-x:auto;margin:16px 0 24px;
+    border-left:4px solid var(--blue);
+  }
+  .code-block.hw{border-left-color:var(--copper);}
+  .code-block pre{margin:0;font-family:var(--font-mono);font-size:12.6px;line-height:1.65;}
+  .code-block .cm{color:#7F8A99;}
+  .code-block .kw{color:#7CA9FF;}
+  .code-block .fn{color:#E8B76A;}
+  .code-block .num{color:#B7E0A8;}
+
+  /* ---------- diagrams ---------- */
+  figure{margin:20px 0 28px;}
+  .diagram-frame{
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    padding:14px;
+  }
+  .diagram-frame svg{width:100%;height:auto;display:block;}
+  figcaption{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-faint);text-align:center;margin-top:10px;}
+
+  /* ---------- roadmap ---------- */
+  .phase-card{
+    border:1px solid var(--line);border-radius:10px;margin-bottom:14px;overflow:hidden;background:var(--surface);
+  }
+  .phase-head{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+    padding:12px 16px;background:var(--line-soft);border-bottom:1px solid var(--line);
+  }
+  .phase-hours{font-family:var(--font-mono);font-weight:600;font-size:13px;color:var(--ink);}
+  .phase-title{font-family:var(--font-display);font-weight:600;font-size:15px;}
+  .phase-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+  @media(max-width:640px){.phase-body{grid-template-columns:1fr;}}
+  .phase-col{padding:14px 16px;}
+  .phase-col.hw{border-right:1px solid var(--line);}
+  @media(max-width:640px){.phase-col.hw{border-right:none;border-bottom:1px solid var(--line);}}
+  .phase-col-label{font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:8px;display:block;}
+  .phase-col.hw .phase-col-label{color:var(--copper);}
+  .phase-col.sw .phase-col-label{color:var(--blue);}
+  .phase-col ul{margin:0;padding-left:18px;font-size:13.4px;}
+  .phase-col li{margin-bottom:5px;}
+  .sync{
+    background:var(--green-soft);border-top:1px dashed #B7DEC5;
+    padding:10px 16px;font-size:12.8px;color:#215A3D;
+    font-family:var(--font-mono);
+  }
+  .sync b{color:#184430;}
+
+  /* ---------- checklist ---------- */
+  .checklist{list-style:none;padding:0;margin:0 0 20px;}
+  .checklist li{
+    display:flex;gap:10px;align-items:flex-start;padding:8px 0;
+    border-bottom:1px solid var(--line-soft);font-size:14px;
+  }
+  .checklist li:last-child{border-bottom:none;}
+  .checklist input{margin-top:4px;flex:none;accent-color:var(--blue);}
+
+  /* ---------- refs ---------- */
+  .ref{font-size:13.5px;margin-bottom:12px;padding-left:26px;text-indent:-26px;color:var(--ink-soft);}
+  .ref b{color:var(--ink);font-weight:600;}
+  .ref a{word-break:break-all;}
+
+  footer{
+    max-width:920px;margin:0 auto;padding:40px 28px 60px;
+    font-family:var(--font-mono);font-size:12px;color:var(--ink-faint);
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;
+  }
+
+  ::selection{background:var(--blue-line);}
+</style>
+</head>
+<body>
+
+<nav class="topnav"><div class="topnav-inner">
+  <a href="#overview">00 Overview</a>
+  <a href="#architecture">01 Architecture</a>
+  <a href="#bom">02 Materials</a>
+  <a href="#hardware">03 Hardware &amp; Pins</a>
+  <a href="#software">04 Software &amp; Flow</a>
+  <a href="#algorithms">05 Algorithms</a>
+  <a href="#roadmap">06 Build Roadmap</a>
+  <a href="#testing">07 Testing</a>
+  <a href="#demo">08 Demo Staging</a>
+  <a href="#troubleshoot">09 Troubleshooting</a>
+  <a href="#references">10 References</a>
+</div></nav>
+
+<header class="hero" id="overview">
+  <div class="wrap">
+    <p class="eyebrow">Implementation Guide</p>
+    <h1 class="title">Predictive Self-Healing IoT Mesh<br>with Real-Time Anomaly Detection</h1>
+    <p class="subtitle">A combined hardware-and-software build guide for a 5-node ESP32 mesh that predicts a
+    failing wireless link from RSSI trend and packet delivery, reroutes traffic before a heartbeat timeout
+    fires, and flags anomalous sensor readings on-device with no cloud step and no pre-training.</p>
+    <div class="hero-meta">
+      <span class="chip">5× ESP32-WROOM-32 · ESP-NOW · Arduino core 3.x</span>
+      <span class="chip">2 analog sensors / node</span>
+      <span class="chip">MAD Z-score + flatline anomaly engine</span>
+      <span class="chip">Distance-vector + priority override routing</span>
+    </div>
+    <figure class="hero-diagram">
+      <svg viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ah0" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/>
+          </marker>
+        </defs>
+        <!-- grid -->
+        <g stroke="#EDEAE0" stroke-width="1">
+          <line x1="0" y1="40" x2="900" y2="40"/>
+          <line x1="0" y1="90" x2="900" y2="90"/>
+          <line x1="0" y1="140" x2="900" y2="140"/>
+          <line x1="0" y1="190" x2="900" y2="190"/>
+        </g>
+        <!-- threshold line -->
+        <line x1="20" y1="150" x2="880" y2="150" stroke="#A9760B" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <text x="24" y="142" font-family="IBM Plex Mono" font-size="11" fill="#A9760B">link_score threshold</text>
+
+        <!-- healthy zone label -->
+        <text x="24" y="60" font-family="IBM Plex Mono" font-size="11" fill="#8B93A0">HEALTHY</text>
+
+        <!-- rssi/link_score curve -->
+        <path d="M20,70 C130,68 180,74 240,80 C310,88 360,96 400,118 C440,140 460,168 480,190 C520,150 600,150 900,150"
+              fill="none" stroke="#2454C7" stroke-width="2.6"/>
+        <!-- point of reroute -->
+        <circle cx="480" cy="190" r="5.5" fill="#2454C7"/>
+        <line x1="480" y1="190" x2="480" y2="230" stroke="#2454C7" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="486" y="228" font-family="IBM Plex Mono" font-size="12" font-weight="600" fill="#2454C7">proactive reroute fires</text>
+        <text x="486" y="242" font-family="IBM Plex Mono" font-size="10.5" fill="#8B93A0">3 consecutive evaluations below threshold</text>
+
+        <!-- timeout marker further right -->
+        <line x1="760" y1="20" x2="760" y2="230" stroke="#8B93A0" stroke-width="1.2" stroke-dasharray="2 4"/>
+        <text x="766" y="34" font-family="IBM Plex Mono" font-size="11.5" fill="#565F69">heartbeat timeout</text>
+        <text x="766" y="48" font-family="IBM Plex Mono" font-size="10.5" fill="#8B93A0">would have fired here</text>
+
+        <!-- lead time bracket -->
+        <line x1="480" y1="20" x2="760" y2="20" stroke="#2E8B57" stroke-width="1.4" marker-end="url(#ah0)"/>
+        <line x1="480" y1="14" x2="480" y2="26" stroke="#2E8B57" stroke-width="1.4"/>
+        <text x="486" y="14" font-family="IBM Plex Mono" font-size="11" font-weight="600" fill="#2E8B57">reroute lead-time (measured, logged live)</text>
+      </svg>
+      <figcaption>The whole thesis in one curve — reroute before the timeout, not after.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============ 01 ARCHITECTURE ============ -->
+<section id="architecture">
+  <div class="section-head"><span class="section-num">01</span><h2>System Architecture</h2></div>
+  <p class="section-dek">Seven layers, bottom to top: raw radio, statistics, routing decisions, reliability, and
+  reporting. Read this once before touching a breadboard or an .ino file — every later section refers back to it.</p>
+
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 760 480" xmlns="http://www.w3.org/2000/svg">
+        <!-- layer bands -->
+        <g font-family="IBM Plex Sans">
+          <!-- 1 transport -->
+          <rect x="20" y="410" width="720" height="52" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="38" y="432" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#B5652A">Transport Layer</text>
+          <text x="38" y="450" font-family="IBM Plex Mono" font-size="11.5" fill="#7A5A3E">ESP-NOW peer-to-peer · Arduino core 3.x · fixed WiFi channel</text>
+
+          <!-- 2 anomaly -->
+          <rect x="20" y="346" width="720" height="52" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="38" y="368" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#2454C7">Anomaly Engine</text>
+          <text x="38" y="386" font-family="IBM Plex Mono" font-size="11.5" fill="#3E4E86">boot calibration → MAD Z-score (spikes/jumps) + flatline detector (stuck)</text>
+
+          <!-- 3 predictor -->
+          <rect x="20" y="282" width="720" height="52" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="38" y="304" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#2454C7">Predictor Layer</text>
+          <text x="38" y="322" font-family="IBM Plex Mono" font-size="11.5" fill="#3E4E86">fused link score = slope(EWMA-RSSI) + PDR window</text>
+
+          <!-- 4 reliability -->
+          <rect x="20" y="218" width="720" height="52" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="38" y="240" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#B5652A">Reliability Layer</text>
+          <text x="38" y="258" font-family="IBM Plex Mono" font-size="11.5" fill="#7A5A3E">hop-by-hop ACK · retransmit · duplicate filter</text>
+
+          <!-- 5 routing -->
+          <rect x="20" y="154" width="720" height="52" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="38" y="176" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#2454C7">Routing Layer</text>
+          <text x="38" y="194" font-family="IBM Plex Mono" font-size="11.5" fill="#3E4E86">distance-vector baseline + priority / shortest-hop override</text>
+
+          <!-- 6 stretch -->
+          <rect x="20" y="98" width="720" height="42" rx="8" fill="none" stroke="#C9CFD8" stroke-dasharray="5 4"/>
+          <text x="38" y="119" font-family="IBM Plex Mono" font-size="11.5" fill="#8B93A0">[stretch, optional] UCB1 multi-armed bandit next-hop selection</text>
+
+          <!-- 7 reporting -->
+          <rect x="20" y="34" width="720" height="52" rx="8" fill="#F4F1E8" stroke="#E4E0D3"/>
+          <text x="38" y="56" font-family="Space Grotesk" font-weight="600" font-size="14" fill="#565F69">Reporting Layer</text>
+          <text x="38" y="74" font-family="IBM Plex Mono" font-size="11.5" fill="#7A8189">OLED (Nodes S, C) · Serial / WebSerial telemetry dashboard</text>
+
+          <!-- arrow up the stack -->
+          <line x1="700" y1="462" x2="700" y2="86" stroke="#8B93A0" stroke-width="1.2" marker-end="url(#ah1)"/>
+        </g>
+        <defs>
+          <marker id="ah1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+    <figcaption>Data flows bottom-up: raw radio → statistics → decisions → reliability → display.</figcaption>
+  </figure>
+
+  <h3>Node topology</h3>
+  <p>Five roles: <strong>A</strong> (source), <strong>B</strong> and <strong>C→D</strong> (two relay paths of
+  different quality), <strong>S</strong> (sink/root). The direct <code>A–S</code> link is deliberately weak and
+  long so it stays the fewest-hop path without being the best-quality one — this is what makes the priority
+  override visibly different from normal routing.</p>
+
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 820 460" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ah2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#565F69"/></marker>
+        </defs>
+        <!-- links first (behind nodes) -->
+        <!-- A-B strong -->
+        <line x1="410" y1="90" x2="220" y2="200" stroke="#2E8B57" stroke-width="2.6"/>
+        <!-- A-C strong -->
+        <line x1="410" y1="90" x2="600" y2="200" stroke="#2E8B57" stroke-width="2.6"/>
+        <!-- B-S strong -->
+        <line x1="220" y1="230" x2="410" y2="380" stroke="#2E8B57" stroke-width="2.6"/>
+        <!-- C-D strong -->
+        <line x1="600" y1="230" x2="600" y2="300" stroke="#2E8B57" stroke-width="2.6"/>
+        <!-- D-S strong -->
+        <line x1="600" y1="330" x2="410" y2="380" stroke="#2E8B57" stroke-width="2.6"/>
+        <!-- A-S weak direct -->
+        <path d="M395,105 C280,220 300,320 395,375" fill="none" stroke="#C1432E" stroke-width="2" stroke-dasharray="7 5"/>
+
+        <!-- labels on links -->
+        <text x="270" y="140" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">A→B strong</text>
+        <text x="470" y="140" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">A→C strong</text>
+        <text x="230" y="315" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">B→S strong</text>
+        <text x="612" y="270" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">C→D</text>
+        <text x="470" y="360" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">D→S strong</text>
+        <text x="260" y="250" font-family="IBM Plex Mono" font-size="10.5" fill="#C1432E">A→S — weak, 1 hop</text>
+        <text x="260" y="264" font-family="IBM Plex Mono" font-size="10.5" fill="#C1432E">(priority path only)</text>
+
+        <!-- nodes -->
+        <g font-family="Space Grotesk" font-weight="600" font-size="15">
+          <circle cx="410" cy="70" r="34" fill="#EBF0FC" stroke="#2454C7" stroke-width="2"/>
+          <text x="410" y="66" text-anchor="middle" fill="#2454C7">A</text>
+          <text x="410" y="83" text-anchor="middle" font-family="IBM Plex Mono" font-weight="400" font-size="9.5" fill="#3E4E86">source</text>
+
+          <circle cx="220" cy="215" r="34" fill="#F8ECDF" stroke="#B5652A" stroke-width="2"/>
+          <text x="220" y="211" text-anchor="middle" fill="#B5652A">B</text>
+          <text x="220" y="228" text-anchor="middle" font-family="IBM Plex Mono" font-weight="400" font-size="9.5" fill="#7A5A3E">relay</text>
+
+          <circle cx="600" cy="215" r="34" fill="#F8ECDF" stroke="#B5652A" stroke-width="2"/>
+          <text x="600" y="211" text-anchor="middle" fill="#B5652A">C</text>
+          <text x="600" y="228" text-anchor="middle" font-family="IBM Plex Mono" font-weight="400" font-size="9.5" fill="#7A5A3E">relay · OLED #2</text>
+
+          <circle cx="600" cy="315" r="34" fill="#F8ECDF" stroke="#B5652A" stroke-width="2"/>
+          <text x="600" y="311" text-anchor="middle" fill="#B5652A">D</text>
+          <text x="600" y="328" text-anchor="middle" font-family="IBM Plex Mono" font-weight="400" font-size="9.5" fill="#7A5A3E">relay · serial only</text>
+
+          <circle cx="410" cy="400" r="34" fill="#E7F4EC" stroke="#2E8B57" stroke-width="2"/>
+          <text x="410" y="396" text-anchor="middle" fill="#215A3D">S</text>
+          <text x="410" y="413" text-anchor="middle" font-family="IBM Plex Mono" font-weight="400" font-size="9.5" fill="#215A3D">sink · OLED #1</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Normal traffic: A→B→S. On Node B degradation: reroute to A→C→D→S. Priority traffic: forced A→S.</figcaption>
+  </figure>
+
+  <div class="callout sw">
+    <span class="callout-title">Demo behaviour this topology produces</span>
+    Drop a Faraday bag over Node B → link score falls → mesh reroutes A→C→D→S (prefers the strong 3-hop path
+    over the weak 1-hop direct link). Send a priority packet → it ignores link quality and forces the weak
+    direct A→S hop instead — the two traffic classes visibly diverge on the dashboard.
+  </div>
+</section>
+
+<!-- ============ 02 BOM ============ -->
+<section id="bom">
+  <div class="section-head"><span class="section-num">02</span><h2>Bill of Materials</h2></div>
+  <p class="section-dek">Baseline configuration: 5× ESP32-WROOM-32 DevKitC, 30-pin. Quantities assume 5 nodes
+  (S, A, B, C, D).</p>
+
+  <div class="table-wrap">
+    <table>
+      <caption>compute + sensing + display</caption>
+      <thead><tr><th>Category</th><th>Item</th><th>Qty</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Compute</td><td>ESP32-WROOM-32 DevKitC / DevKit V1, 30-pin</td><td class="center">5</td><td>Dual-core, 240 MHz, 520 KB SRAM. Get the 30-pin variant — 36-pin is too wide for a standard breadboard.</td></tr>
+        <tr><td>Compute</td><td>Micro-USB or USB-C data cable</td><td class="center">5</td><td>Match your boards' port — flashing and power both go over this.</td></tr>
+        <tr><td>Sensing</td><td>Rotary potentiometer, 10 kΩ linear</td><td class="center">5</td><td>Channel A — manual spike / stuck-value injector.</td></tr>
+        <tr><td>Sensing</td><td>LDR photoresistor (GL5528 or similar)</td><td class="center">5</td><td>Channel B — ambient light / shadow disturbance.</td></tr>
+        <tr><td>Sensing</td><td>10 kΩ resistor</td><td class="center">5</td><td>Pairs with each LDR to form a voltage divider.</td></tr>
+        <tr><td>Display</td><td>0.96" SSD1306 OLED, I2C, 128×64</td><td class="center">2</td><td>Node S (mesh telemetry) and Node C (local anomaly flag) only.</td></tr>
+        <tr><td>Feedback</td><td>Piezo buzzer module</td><td class="center">5</td><td>Optional — audible anomaly cue per node.</td></tr>
+        <tr><td>Prototyping</td><td>Solderless breadboard, 400-point</td><td class="center">5</td><td></td></tr>
+        <tr><td>Prototyping</td><td>Jumper wire pack (M-M, M-F, F-F), 22 AWG</td><td class="center">1 pack</td><td></td></tr>
+        <tr><td>Prototyping</td><td>Heat-shrink or tape</td><td class="center">1 roll</td><td>Strain relief so a lead doesn't fall out mid-demo.</td></tr>
+        <tr><td>Power</td><td>Powered USB hub (5V / 2.4A per port) <em>or</em> 18650 battery packs</td><td class="center">1 / 5</td><td>Decouples nodes from a single laptop's throttled ports.</td></tr>
+        <tr><td>Power</td><td>Multi-outlet power strip</td><td class="center">1</td><td></td></tr>
+        <tr><td>Demo staging</td><td>Anti-static Faraday bag or small metal enclosure</td><td class="center">1</td><td>RF attenuation over Node B.</td></tr>
+        <tr><td>Demo staging</td><td>Laptop running serial / WebSerial dashboard</td><td class="center">1</td><td><code>pyserial</code> + <code>matplotlib</code>, or a simple web page.</td></tr>
+        <tr><td>Tools</td><td>Small Phillips screwdriver, tweezers, multimeter</td><td class="center">1 set</td><td>Verify voltage dividers before assuming firmware is the bug.</td></tr>
+        <tr><td>Tools</td><td>Spare jumper wires + one spare ESP32 board</td><td class="center">1</td><td></td></tr>
+        <tr><td>Stretch only</td><td>ESP32-S3 dev board</td><td class="center">1–2</td><td>Only if attempting an optional TinyML autoencoder goal — don't buy until the core system works.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout sw">
+    <span class="callout-title">Software environment — set up before build hours start</span>
+    Arduino IDE or PlatformIO with <strong>ESP32 board support core 3.x (ESP-IDF ≥ 5.1)</strong> pre-installed —
+    this is required for per-packet RSSI in the ESP-NOW receive callback. Test the ESP-NOW example on two
+    boards beforehand and confirm <code>info→rx_ctrl→rssi</code> actually reads a value. Install Python 3 with
+    <code>pyserial</code> and <code>matplotlib</code> on the dashboard laptop.
+  </div>
+</section>
+
+<!-- ============ 03 HARDWARE ============ -->
+<section id="hardware">
+  <div class="section-head"><span class="section-num">03</span><h2>Hardware &amp; Pin Connections</h2></div>
+  <p class="section-dek">Every node shares one wiring pattern. Two nodes (S and C) add an OLED on top of it.
+  Wire all five identically first, then add the two displays.</p>
+
+  <div class="callout danger">
+    <span class="callout-title">The single most likely "sensor is lying" bug</span>
+    On the classic ESP32, <strong>ADC2 pins stop working the moment ESP-NOW/WiFi is active</strong> — any
+    <code>analogRead()</code> on an ADC2 pin returns an error or garbage, and this only appears <em>after</em>
+    the radio starts, so it will not show up in a quick pre-mesh bench test. Wire both analog sensors on
+    every node to <strong>ADC1 pins only</strong>.
+  </div>
+
+  <h3>GPIO allocation — per node</h3>
+  <div class="table-wrap">
+    <table>
+      <caption>every node (S, A, B, C, D) — identical sensor + power wiring</caption>
+      <thead><tr><th>Pin</th><th>Function</th><th>Signal</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="pin">GPIO34</td><td class="mono">ADC1_CH6</td><td>Potentiometer wiper (Channel A)</td><td>Input-only pin — fine, this channel is read-only.</td></tr>
+        <tr><td class="pin">GPIO35</td><td class="mono">ADC1_CH7</td><td>LDR divider midpoint (Channel B)</td><td>Input-only pin — fine, this channel is read-only.</td></tr>
+        <tr><td class="pin">GPIO25</td><td class="mono">Digital out</td><td>Piezo buzzer signal</td><td>Regular output-capable GPIO. Never use 34/35/36/39 for the buzzer — they cannot drive an output.</td></tr>
+        <tr><td class="pin">GPIO21</td><td class="mono">I2C SDA</td><td>OLED data line</td><td>Nodes S and C only. Default ESP32 I2C pin — no code changes needed.</td></tr>
+        <tr><td class="pin">GPIO22</td><td class="mono">I2C SCL</td><td>OLED clock line</td><td>Nodes S and C only. Default ESP32 I2C pin.</td></tr>
+        <tr><td class="pin">3V3</td><td class="mono">Power</td><td>Sensor + OLED VCC</td><td>Do not power sensors from 5V — ESP32 GPIOs are not 5V tolerant.</td></tr>
+        <tr><td class="pin">GND</td><td class="mono">Ground</td><td>Common return</td><td>Star or bus all grounds on the breadboard rail.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <caption>safe vs. avoid — full ESP32-WROOM-32 GPIO reference</caption>
+      <thead><tr><th>Category</th><th>Pins</th><th>Guidance</th></tr></thead>
+      <tbody>
+        <tr><td>ADC1 (usable with WiFi/ESP-NOW active)</td><td class="mono">32, 33, 34, 35, 36, 39</td><td>Use for all analog sensors. This project uses 34 and 35.</td></tr>
+        <tr><td>ADC2 (dead once radio starts)</td><td class="mono">0, 2, 4, 12–15, 25–27</td><td>Never wire an analog sensor here on a mesh node.</td></tr>
+        <tr><td>Input-only (no output, no internal pull)</td><td class="mono">34, 35, 36, 39</td><td>Analog-read only — cannot drive an LED, buzzer, or button pull-up.</td></tr>
+        <tr><td>Strapping / boot-sensitive</td><td class="mono">0, 2, 12, 15</td><td>Avoid for external circuitry — a wrong pull resistor here can prevent boot.</td></tr>
+        <tr><td>Reserved for flash</td><td class="mono">6–11</td><td>Never use — not broken out on most DevKit boards anyway.</td></tr>
+        <tr><td>Default I2C</td><td class="mono">21 (SDA), 22 (SCL)</td><td>Used for both OLEDs in this build.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Wiring schematic — one node, fully populated</h3>
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 860 640" xmlns="http://www.w3.org/2000/svg">
+        <!-- board -->
+        <rect x="300" y="40" width="260" height="560" rx="14" fill="#F4F1E8" stroke="#C9CFD8" stroke-width="1.6"/>
+        <text x="430" y="78" text-anchor="middle" font-family="Space Grotesk" font-weight="600" font-size="15" fill="#171B20">ESP32-WROOM-32</text>
+        <text x="430" y="96" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#8B93A0">DevKitC · 30-pin</text>
+
+        <!-- pin stubs left -->
+        <g font-family="IBM Plex Mono" font-size="12" font-weight="600">
+          <line x1="300" y1="160" x2="255" y2="160" stroke="#B5652A" stroke-width="2.4"/>
+          <text x="248" y="164" text-anchor="end" fill="#B5652A">GPIO34</text>
+
+          <line x1="300" y1="220" x2="255" y2="220" stroke="#B5652A" stroke-width="2.4"/>
+          <text x="248" y="224" text-anchor="end" fill="#B5652A">GPIO35</text>
+
+          <line x1="300" y1="300" x2="255" y2="300" stroke="#B5652A" stroke-width="2.4"/>
+          <text x="248" y="304" text-anchor="end" fill="#B5652A">GPIO25</text>
+
+          <line x1="300" y1="380" x2="255" y2="380" stroke="#2454C7" stroke-width="2.4"/>
+          <text x="248" y="384" text-anchor="end" fill="#2454C7">GPIO21 (SDA)</text>
+
+          <line x1="300" y1="410" x2="255" y2="410" stroke="#2454C7" stroke-width="2.4"/>
+          <text x="248" y="414" text-anchor="end" fill="#2454C7">GPIO22 (SCL)</text>
+        </g>
+
+        <!-- pin stubs right : power -->
+        <g font-family="IBM Plex Mono" font-size="12" font-weight="600">
+          <line x1="560" y1="120" x2="610" y2="120" stroke="#2E8B57" stroke-width="2.4"/>
+          <text x="618" y="124" fill="#2E8B57">3V3</text>
+          <line x1="560" y1="560" x2="610" y2="560" stroke="#565F69" stroke-width="2.4"/>
+          <text x="618" y="564" fill="#565F69">GND</text>
+        </g>
+
+        <!-- rails -->
+        <line x1="700" y1="70" x2="700" y2="600" stroke="#2E8B57" stroke-width="2"/>
+        <text x="706" y="66" font-family="IBM Plex Mono" font-size="10.5" fill="#2E8B57">3V3 rail</text>
+        <line x1="740" y1="70" x2="740" y2="600" stroke="#565F69" stroke-width="2"/>
+        <text x="746" y="66" font-family="IBM Plex Mono" font-size="10.5" fill="#565F69">GND rail</text>
+        <line x1="610" y1="120" x2="700" y2="120" stroke="#2E8B57" stroke-width="1.6"/>
+        <line x1="610" y1="560" x2="740" y2="560" stroke="#565F69" stroke-width="1.6"/>
+
+        <!-- Potentiometer -->
+        <g>
+          <rect x="60" y="130" width="120" height="60" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="120" y="155" text-anchor="middle" font-family="Space Grotesk" font-weight="600" font-size="12.5" fill="#2454C7">Potentiometer</text>
+          <text x="120" y="172" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3E4E86">10kΩ linear</text>
+          <line x1="180" y1="160" x2="255" y2="160" stroke="#B5652A" stroke-width="2"/>
+          <text x="192" y="152" font-family="IBM Plex Mono" font-size="9.5" fill="#8B93A0">wiper</text>
+          <line x1="60" y1="140" x2="30" y2="140" stroke="#2E8B57" stroke-width="1.6"/>
+          <line x1="30" y1="140" x2="30" y2="120" stroke="#2E8B57" stroke-width="1.6"/>
+          <line x1="30" y1="120" x2="700" y2="120" stroke="#2E8B57" stroke-width="1.2" stroke-dasharray="3 3"/>
+          <line x1="60" y1="180" x2="30" y2="180" stroke="#565F69" stroke-width="1.6"/>
+          <line x1="30" y1="180" x2="30" y2="560" stroke="#565F69" stroke-width="1.6"/>
+          <line x1="30" y1="560" x2="740" y2="560" stroke="#565F69" stroke-width="1.2" stroke-dasharray="3 3"/>
+          <text x="35" y="200" font-family="IBM Plex Mono" font-size="9" fill="#8B93A0">outer legs → 3V3 / GND</text>
+        </g>
+
+        <!-- LDR divider -->
+        <g>
+          <rect x="60" y="230" width="120" height="80" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="120" y="252" text-anchor="middle" font-family="Space Grotesk" font-weight="600" font-size="12.5" fill="#2454C7">LDR divider</text>
+          <text x="120" y="268" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3E4E86">LDR + 10kΩ</text>
+          <text x="120" y="282" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" fill="#3E4E86">3V3 → LDR → node → 10k → GND</text>
+          <line x1="180" y1="220" x2="255" y2="220" stroke="#B5652A" stroke-width="2"/>
+          <text x="188" y="212" font-family="IBM Plex Mono" font-size="9.5" fill="#8B93A0">junction</text>
+        </g>
+
+        <!-- Buzzer -->
+        <g>
+          <rect x="60" y="330" width="120" height="60" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="120" y="355" text-anchor="middle" font-family="Space Grotesk" font-weight="600" font-size="12.5" fill="#B5652A">Piezo buzzer</text>
+          <text x="120" y="372" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#7A5A3E">module, optional</text>
+          <line x1="180" y1="300" x2="255" y2="300" stroke="#B5652A" stroke-width="2"/>
+        </g>
+
+        <!-- OLED -->
+        <g>
+          <rect x="40" y="410" width="160" height="90" rx="8" fill="none" stroke="#C9CFD8" stroke-dasharray="5 4"/>
+          <text x="120" y="404" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#8B93A0">Nodes S &amp; C only</text>
+          <rect x="55" y="425" width="130" height="60" rx="6" fill="#F4F1E8" stroke="#C9CFD8"/>
+          <text x="120" y="450" text-anchor="middle" font-family="Space Grotesk" font-weight="600" font-size="12" fill="#171B20">SSD1306 OLED</text>
+          <text x="120" y="467" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#565F69">128×64, I2C</text>
+          <line x1="185" y1="440" x2="255" y2="380" stroke="#2454C7" stroke-width="2"/>
+          <line x1="185" y1="455" x2="255" y2="410" stroke="#2454C7" stroke-width="2"/>
+          <text x="196" y="435" font-family="IBM Plex Mono" font-size="9" fill="#8B93A0">SDA/SCL</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Both sensors on ADC1, buzzer on a regular GPIO, OLED on the default I2C bus — added only on Nodes S and C.</figcaption>
+  </figure>
+
+  <h4>Node-by-node build checklist</h4>
+  <div class="table-wrap">
+    <table>
+      <caption>what differs between the five physical boards</caption>
+      <thead><tr><th>Node</th><th>Sensors</th><th>OLED</th><th>Buzzer</th><th>Reporting</th></tr></thead>
+      <tbody>
+        <tr><td><strong>S</strong> — sink/root</td><td>Pot + LDR</td><td>Yes — mesh telemetry (reroute events, link scores)</td><td>Optional</td><td>OLED + Serial/WebSerial dashboard</td></tr>
+        <tr><td><strong>A</strong> — source</td><td>Pot + LDR</td><td>No</td><td>Optional</td><td>Serial only</td></tr>
+        <tr><td><strong>B</strong> — relay</td><td>Pot + LDR</td><td>No</td><td>Optional</td><td>Serial only</td></tr>
+        <tr><td><strong>C</strong> — relay</td><td>Pot + LDR</td><td>Yes — local SPIKE/JUMP and STUCK flags</td><td>Optional</td><td>OLED + Serial</td></tr>
+        <tr><td><strong>D</strong> — relay</td><td>Pot + LDR</td><td>No, by design</td><td>Optional</td><td>Serial only — keeps the BOM at 5 boards / 2 displays</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout hw">
+    <span class="callout-title">Bench-test order, before assembling into the mesh</span>
+    1) Power one board over USB, confirm boot over Serial. 2) Wire the potentiometer, confirm
+    <code>analogRead(34)</code> sweeps 0–4095. 3) Wire the LDR divider, confirm <code>analogRead(35)</code>
+    changes when you cover it. 4) On S and C only, wire the OLED and run an I2C scanner sketch to confirm it
+    answers at <code>0x3C</code>. 5) Only after all four pass on a single board, duplicate the wiring to the
+    remaining four boards.
+  </div>
+</section>
+
+<!-- ============ 04 SOFTWARE ============ -->
+<section id="software">
+  <div class="section-head"><span class="section-num">04</span><h2>Software &amp; Control Flow</h2></div>
+  <p class="section-dek">Same five boards, same firmware image (role is selected by a compile-time flag or a
+  MAC-address lookup table). Four flowcharts cover everything that runs: boot, the main loop, the link
+  predictor, and the anomaly engine.</p>
+
+  <div class="callout danger">
+    <span class="callout-title">Toolchain constraint — confirm this at hour 0, not hour 10</span>
+    Per-packet RSSI is only exposed in the ESP-NOW receive callback on <strong>Arduino-ESP32 core 3.x
+    (ESP-IDF ≥ 5.1)</strong>, where the callback's first argument is <code>esp_now_recv_info_t*</code> and RSSI
+    is read from <code>info→rx_ctrl→rssi</code>. On core 2.x the callback gives only the MAC address — no
+    RSSI — and the entire predictor depends on this one fact. Pin the toolchain to core 3.x before writing
+    any predictor code, and do not copy pre-3.0 tutorials; several fail to compile on 3.0.0.
+  </div>
+
+  <h3>Boot sequence — every node</h3>
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 620 900" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/></marker></defs>
+        <g font-family="IBM Plex Sans" font-size="13">
+          <!-- step boxes -->
+          <rect x="140" y="20" width="340" height="50" rx="8" fill="#F4F1E8" stroke="#C9CFD8"/>
+          <text x="310" y="50" text-anchor="middle">Power on / reset</text>
+          <line x1="310" y1="70" x2="310" y2="106" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <rect x="140" y="106" width="340" height="50" rx="8" fill="#F4F1E8" stroke="#C9CFD8"/>
+          <text x="310" y="136" text-anchor="middle">Init Serial, I2C (S/C only), GPIO modes</text>
+          <line x1="310" y1="156" x2="310" y2="192" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <rect x="140" y="192" width="340" height="50" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="310" y="222" text-anchor="middle" fill="#7A5A3E">Set fixed WiFi channel (all 5 nodes match)</text>
+          <line x1="310" y1="242" x2="310" y2="278" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <rect x="140" y="278" width="340" height="50" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="310" y="308" text-anchor="middle" fill="#7A5A3E">Init ESP-NOW, register peers + recv/send callbacks</text>
+          <line x1="310" y1="328" x2="310" y2="364" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <rect x="120" y="364" width="380" height="60" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="310" y="390" text-anchor="middle" fill="#2454C7">Buffer ~100 raw ADC samples per sensor</text>
+          <text x="310" y="408" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="#3E4E86">(boot calibration window)</text>
+          <line x1="310" y1="424" x2="310" y2="460" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <!-- decision diamond -->
+          <polygon points="310,460 460,530 310,600 160,530" fill="#FBF2DC" stroke="#E9D69B" stroke-width="1.6"/>
+          <text x="310" y="524" text-anchor="middle" font-size="12.5" fill="#7A5C0E">variance within</text>
+          <text x="310" y="540" text-anchor="middle" font-size="12.5" fill="#7A5C0E">safety envelope?</text>
+
+          <!-- No branch loop back -->
+          <line x1="160" y1="530" x2="60" y2="530" stroke="#C1432E" marker-end="url(#ah3)"/>
+          <text x="66" y="522" font-size="12" fill="#C1432E">no</text>
+          <line x1="60" y1="530" x2="60" y2="394" stroke="#C1432E"/>
+          <line x1="60" y1="394" x2="118" y2="394" stroke="#C1432E" marker-end="url(#ah3)"/>
+          <text x="30" y="470" font-size="11.5" fill="#C1432E" transform="rotate(-90 30 470)">restart calibration</text>
+
+          <!-- Yes branch -->
+          <line x1="310" y1="600" x2="310" y2="636" stroke="#2E8B57" marker-end="url(#ah3)"/>
+          <text x="330" y="622" font-size="12" fill="#2E8B57">yes</text>
+
+          <rect x="110" y="636" width="400" height="60" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="310" y="662" text-anchor="middle" fill="#215A3D">Compute median + MAD baseline, freeze into RAM</text>
+          <text x="310" y="680" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="#215A3D">MAD floored to real ADC quantisation noise, not 0</text>
+          <line x1="310" y1="696" x2="310" y2="732" stroke="#8B93A0" marker-end="url(#ah3)"/>
+
+          <rect x="140" y="732" width="340" height="50" rx="8" fill="#171B20"/>
+          <text x="310" y="762" text-anchor="middle" fill="#FAFAF6" font-weight="600">Enter main loop →</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Copper = hardware/radio setup, blue = statistics setup, amber = the one decision that can loop.</figcaption>
+  </figure>
+
+  <h3>Main loop — every evaluation cycle (~100–200 ms)</h3>
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 700 1080" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/></marker></defs>
+        <g font-family="IBM Plex Sans" font-size="12.5">
+          <rect x="150" y="16" width="400" height="46" rx="8" fill="#F4F1E8" stroke="#C9CFD8"/>
+          <text x="350" y="44" text-anchor="middle">Read GPIO34 (pot), GPIO35 (LDR)</text>
+          <line x1="350" y1="62" x2="350" y2="96" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="96" width="440" height="46" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="350" y="124" text-anchor="middle" fill="#2454C7">Anomaly engine: MAD Z-score + flatline check (§ below)</text>
+          <line x1="350" y1="142" x2="350" y2="176" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="176" width="440" height="46" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="350" y="204" text-anchor="middle" fill="#2454C7">Update RSSI EWMA from last received packet's rx_ctrl→rssi</text>
+          <line x1="350" y1="222" x2="350" y2="256" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="256" width="440" height="46" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="350" y="284" text-anchor="middle" fill="#2454C7">Least-squares slope over window W + PDR over 20 frames</text>
+          <line x1="350" y1="302" x2="350" y2="336" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="336" width="440" height="46" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="350" y="364" text-anchor="middle" fill="#2454C7">Compute link_score, compare to threshold</text>
+          <line x1="350" y1="382" x2="350" y2="416" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <polygon points="350,416 490,478 350,540 210,478" fill="#FBF2DC" stroke="#E9D69B" stroke-width="1.6"/>
+          <text x="350" y="472" text-anchor="middle" font-size="12" fill="#7A5C0E">below threshold</text>
+          <text x="350" y="488" text-anchor="middle" font-size="12" fill="#7A5C0E">3× in a row?</text>
+
+          <line x1="490" y1="478" x2="600" y2="478" stroke="#2E8B57" marker-end="url(#ah4)"/>
+          <text x="588" y="470" font-size="12" fill="#2E8B57" text-anchor="end">yes</text>
+          <rect x="470" y="500" width="200" height="60" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="570" y="524" text-anchor="middle" fill="#215A3D">Proactively update</text>
+          <text x="570" y="540" text-anchor="middle" fill="#215A3D">next-hop table</text>
+          <line x1="570" y1="560" x2="570" y2="602" stroke="#2E8B57"/>
+          <line x1="570" y1="602" x2="440" y2="602" stroke="#2E8B57" marker-end="url(#ah4)"/>
+
+          <line x1="350" y1="540" x2="350" y2="602" stroke="#8B93A0" marker-end="url(#ah4)"/>
+          <text x="366" y="560" font-size="12" fill="#8B93A0">no</text>
+
+          <rect x="130" y="602" width="440" height="46" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="350" y="630" text-anchor="middle" fill="#B5652A">Build outgoing frame (heartbeat / data / priority)</text>
+          <line x1="350" y1="648" x2="350" y2="682" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="682" width="440" height="46" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="350" y="710" text-anchor="middle" fill="#B5652A">esp_now_send() to selected next hop</text>
+          <line x1="350" y1="728" x2="350" y2="762" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="762" width="440" height="46" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="350" y="790" text-anchor="middle" fill="#B5652A">On receive: dup-filter → ACK → forward or consume</text>
+          <line x1="350" y1="808" x2="350" y2="842" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="130" y="842" width="440" height="46" rx="8" fill="#F4F1E8" stroke="#C9CFD8"/>
+          <text x="350" y="870" text-anchor="middle">Update OLED (S, C) / push telemetry over Serial</text>
+          <line x1="350" y1="888" x2="350" y2="922" stroke="#8B93A0" marker-end="url(#ah4)"/>
+
+          <rect x="150" y="922" width="400" height="46" rx="8" fill="#171B20"/>
+          <text x="350" y="950" text-anchor="middle" fill="#FAFAF6" font-weight="600">Sleep to next tick, repeat ↻</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>One pass runs the full stack from § 01: sensors → anomaly → predictor → routing → reliability → reporting.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 05 ALGORITHMS ============ -->
+<section id="algorithms">
+  <div class="section-head"><span class="section-num">05</span><h2>Algorithms Reference</h2></div>
+  <p class="section-dek">The four pieces of logic that make this project defensible: link prediction, robust
+  anomaly detection, stuck-value detection, and priority override. Each has a diagram and reference pseudocode.</p>
+
+  <h3>5.1 — Link degradation predictor</h3>
+  <p>RSSI alone is sampled only during the packet preamble and often stays flat even as real interference
+  builds — predicting failure from raw RSSI risks missing the exact degradation it's meant to catch. The fix:
+  smooth first, then differentiate, then fuse with delivery rate.</p>
+
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 700 480" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah5" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/></marker></defs>
+        <g font-family="IBM Plex Sans" font-size="12.5">
+          <rect x="30" y="20" width="280" height="56" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="170" y="44" text-anchor="middle" fill="#2454C7">Raw RSSI per packet</text>
+          <text x="170" y="62" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#3E4E86">from rx_ctrl→rssi</text>
+          <line x1="310" y1="48" x2="360" y2="48" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="360" y="20" width="280" height="56" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="500" y="44" text-anchor="middle" fill="#2454C7">EWMA smoothing</text>
+          <text x="500" y="62" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#3E4E86">α ≈ 0.3</text>
+          <line x1="500" y1="76" x2="500" y2="112" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="360" y="112" width="280" height="56" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="500" y="136" text-anchor="middle" fill="#2454C7">Least-squares slope</text>
+          <text x="500" y="154" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#3E4E86">over last W samples, signed</text>
+          <line x1="500" y1="168" x2="500" y2="204" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="360" y="204" width="280" height="56" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="500" y="228" text-anchor="middle" fill="#2454C7">degrade_term = clamp(-slope/SLOPE_REF, 0, 1)</text>
+          <text x="500" y="246" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#3E4E86">rising link ⇒ 0, never triggers reroute</text>
+
+          <rect x="30" y="112" width="280" height="56" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="170" y="136" text-anchor="middle" fill="#B5652A">Send/ACK outcomes</text>
+          <text x="170" y="154" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#7A5A3E">link-layer ACK, free from send callback</text>
+          <line x1="170" y1="168" x2="170" y2="204" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="30" y="204" width="280" height="56" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="170" y="228" text-anchor="middle" fill="#B5652A">PDR(t)</text>
+          <text x="170" y="246" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#7A5A3E">delivered / sent, 20-frame window</text>
+
+          <line x1="170" y1="260" x2="170" y2="300" stroke="#8B93A0"/>
+          <line x1="500" y1="260" x2="500" y2="300" stroke="#8B93A0"/>
+          <line x1="170" y1="300" x2="500" y2="300" stroke="#8B93A0"/>
+          <line x1="335" y1="300" x2="335" y2="336" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="150" y="336" width="370" height="56" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="335" y="360" text-anchor="middle" fill="#215A3D" font-weight="600">link_score = w1·(1 − degrade_term) + w2·PDR(t)</text>
+          <text x="335" y="378" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">higher = healthier · w1 = w2 = 0.5 to start</text>
+          <line x1="335" y1="392" x2="335" y2="428" stroke="#8B93A0" marker-end="url(#ah5)"/>
+
+          <rect x="120" y="428" width="430" height="46" rx="8" fill="#171B20"/>
+          <text x="335" y="456" text-anchor="middle" fill="#FAFAF6" font-weight="600">reroute if below threshold for 3 consecutive evaluations</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Two independent evidence streams (RSSI trend, delivery rate) fused into one polarity-consistent score.</figcaption>
+  </figure>
+
+  <div class="code-block sw">
+<pre><span class="cm">// smoothing: HIGHER alpha = more reactive, lower = smoother</span>
+rssi_ewma = alpha * rssi_sample + (1 - alpha) * rssi_ewma;   <span class="cm">// alpha ~ 0.3</span>
+
+<span class="cm">// slope: least-squares fit over the last W points of rssi_ewma, NOT raw rssi</span>
+slope = least_squares_slope(rssi_ewma_window, W);             <span class="cm">// negative = degrading</span>
+
+<span class="cm">// degrade_term is zero unless the trend is genuinely falling</span>
+degrade_term = clamp(-slope / SLOPE_REF, <span class="num">0.0</span>, <span class="num">1.0</span>);
+
+link_score = w1 * (<span class="num">1.0</span> - degrade_term) + w2 * pdr;   <span class="cm">// w1 = w2 = 0.5</span>
+
+<span class="kw">if</span> (link_score &lt; THRESHOLD) {
+  below_count++;
+  <span class="kw">if</span> (below_count &gt;= <span class="num">3</span>) trigger_proactive_reroute();
+} <span class="kw">else</span> {
+  below_count = <span class="num">0</span>;
+}
+<span class="cm">// heartbeat timeout stays armed regardless, as a hard fallback</span></pre>
+  </div>
+
+  <h4>Timing parameters — pin these first</h4>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Parameter</th><th>Starting value</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Heartbeat interval</td><td class="mono">100–200 ms</td><td>Gives the slope estimator resolution — 1 Hz is far too slow to beat a timeout.</td></tr>
+        <tr><td>Slope window W</td><td class="mono">15–20 samples (≈2–4 s)</td><td>Enough to see a trend without lagging the event.</td></tr>
+        <tr><td>PDR window</td><td class="mono">20 frames</td><td>Matches ≈2–4 s at the heartbeat rate above.</td></tr>
+        <tr><td>Heartbeat timeout</td><td class="mono">3–5× predictor reaction (≈1–2 s)</td><td>Guarantees the proactive reroute normally wins; timeout is only a safety net.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>5.2 — Anomaly engine: MAD Z-score + flatline detector</h3>
+  <p>A standard Z-score is undermined by the anomaly it's meant to catch: one extreme reading drags the mean
+  and inflates the standard deviation, hiding the spike. The modified Z-score uses the median and the median
+  absolute deviation (MAD) instead — both are robust to outliers by construction. A point-anomaly test like
+  this, however, structurally cannot see a sensor stuck at its own median — that needs a second, independent
+  detector.</p>
+
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 760 520" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah6" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/></marker></defs>
+        <g font-family="IBM Plex Sans" font-size="12.5">
+          <rect x="270" y="16" width="220" height="46" rx="8" fill="#171B20"/>
+          <text x="380" y="44" text-anchor="middle" fill="#FAFAF6" font-weight="600">new ADC sample</text>
+          <line x1="380" y1="62" x2="380" y2="90" stroke="#8B93A0"/>
+          <line x1="200" y1="90" x2="560" y2="90" stroke="#8B93A0"/>
+          <line x1="200" y1="90" x2="200" y2="120" stroke="#8B93A0" marker-end="url(#ah6)"/>
+          <line x1="560" y1="90" x2="560" y2="120" stroke="#8B93A0" marker-end="url(#ah6)"/>
+
+          <!-- MAD-Z path -->
+          <rect x="60" y="120" width="280" height="52" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="200" y="150" text-anchor="middle" fill="#2454C7">modified_z = 0.6745·|x − median| / MAD</text>
+          <line x1="200" y1="172" x2="200" y2="204" stroke="#8B93A0" marker-end="url(#ah6)"/>
+
+          <rect x="60" y="204" width="280" height="52" rx="8" fill="#EBF0FC" stroke="#B9C9F2"/>
+          <text x="200" y="228" text-anchor="middle" fill="#2454C7">MAD floored to real ADC</text>
+          <text x="200" y="244" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#3E4E86">quantisation noise, not 0.001</text>
+          <line x1="200" y1="256" x2="200" y2="288" stroke="#8B93A0" marker-end="url(#ah6)"/>
+
+          <polygon points="200,288 300,330 200,372 100,330" fill="#FBF2DC" stroke="#E9D69B"/>
+          <text x="200" y="326" text-anchor="middle" font-size="11.5" fill="#7A5C0E">|z| &gt; 3.5 ?</text>
+          <line x1="200" y1="372" x2="200" y2="404" stroke="#2E8B57" marker-end="url(#ah6)"/>
+          <text x="216" y="392" font-size="11" fill="#2E8B57">yes</text>
+          <rect x="80" y="404" width="240" height="44" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="200" y="431" text-anchor="middle" fill="#215A3D" font-weight="600">flag: SPIKE / JUMP</text>
+
+          <!-- flatline path -->
+          <rect x="420" y="120" width="280" height="52" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="560" y="150" text-anchor="middle" fill="#B5652A">|x − last_val| &lt; EPS ?</text>
+          <line x1="560" y1="172" x2="560" y2="204" stroke="#8B93A0" marker-end="url(#ah6)"/>
+
+          <rect x="420" y="204" width="280" height="52" rx="8" fill="#F8ECDF" stroke="#E7CBA8"/>
+          <text x="560" y="228" text-anchor="middle" fill="#B5652A">yes → stuck_count++</text>
+          <text x="560" y="244" text-anchor="middle" fill="#B5652A">no → stuck_count = 0</text>
+          <line x1="560" y1="256" x2="560" y2="288" stroke="#8B93A0" marker-end="url(#ah6)"/>
+
+          <polygon points="560,288 660,330 560,372 460,330" fill="#FBF2DC" stroke="#E9D69B"/>
+          <text x="560" y="326" text-anchor="middle" font-size="11" fill="#7A5C0E">count ≥ N?</text>
+          <text x="560" y="340" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" fill="#7A5C0E">(N ≈ 50)</text>
+          <line x1="560" y1="372" x2="560" y2="404" stroke="#2E8B57" marker-end="url(#ah6)"/>
+          <text x="576" y="392" font-size="11" fill="#2E8B57">yes</text>
+          <rect x="440" y="404" width="240" height="44" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="560" y="431" text-anchor="middle" fill="#215A3D" font-weight="600">flag: STUCK</text>
+
+          <line x1="200" y1="448" x2="200" y2="472" stroke="#8B93A0"/>
+          <line x1="560" y1="448" x2="560" y2="472" stroke="#8B93A0"/>
+          <line x1="200" y1="472" x2="560" y2="472" stroke="#8B93A0"/>
+          <line x1="380" y1="472" x2="380" y2="496" stroke="#8B93A0" marker-end="url(#ah6)"/>
+          <text x="380" y="514" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="#565F69">both flags reported independently — never merged</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Two detectors run on every sample, in parallel, per sensor, per node.</figcaption>
+  </figure>
+
+  <div class="code-block sw">
+<pre><span class="cm">// ---- boot calibration: run once, ~100 samples, per sensor ----</span>
+median = median(boot_samples);
+mad    = median(abs(boot_samples - median));
+<span class="kw">if</span> (mad &lt; MAD_FLOOR) mad = MAD_FLOOR;   <span class="cm">// ~3 ADC LSB on a 12-bit ADC — real noise floor</span>
+
+<span class="cm">// ---- every subsequent sample ----</span>
+<span class="fn">float</span> compute_modified_z(<span class="fn">float</span> x, <span class="fn">float</span> median, <span class="fn">float</span> mad) {
+  <span class="kw">if</span> (mad &lt; MAD_FLOOR) mad = MAD_FLOOR;
+  <span class="kw">return</span> <span class="num">0.6745f</span> * fabsf(x - median) / mad;
+}
+<span class="cm">// flag SPIKE/JUMP if |modified_z| &gt; 3.5   (Iglewicz &amp; Hoaglin threshold)</span>
+
+<span class="cm">// ---- flatline detector, runs alongside, catches what MAD-Z structurally cannot ----</span>
+<span class="kw">if</span> (fabsf(x - last_val) &lt; EPS) stuck_count++; <span class="kw">else</span> stuck_count = <span class="num">0</span>;
+last_val = x;
+<span class="fn">bool</span> stuck = (stuck_count &gt;= STUCK_N);   <span class="cm">// STUCK_N ~ 50 samples</span></pre>
+  </div>
+
+  <h3>5.3 — Priority override</h3>
+  <p>Normal traffic takes the quality-optimal route from the distance-vector table. A priority flag on a
+  packet skips that lookup entirely and forces the shortest-hop path, regardless of quality — visible on this
+  topology because the shortest path (direct A–S) is deliberately the weakest one.</p>
+
+  <figure>
+    <div class="diagram-frame">
+      <svg viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah7" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8B93A0"/></marker></defs>
+        <g font-family="IBM Plex Sans" font-size="12.5">
+          <rect x="20" y="80" width="160" height="52" rx="8" fill="#171B20"/>
+          <text x="100" y="110" text-anchor="middle" fill="#FAFAF6" font-weight="600">Outgoing packet</text>
+          <line x1="180" y1="106" x2="220" y2="106" stroke="#8B93A0" marker-end="url(#ah7)"/>
+
+          <polygon points="220,60 340,106 220,152 100,106" fill="#FBF2DC" stroke="#E9D69B" transform="translate(0,0)"/>
+          <text x="220" y="102" text-anchor="middle" font-size="11.5" fill="#7A5C0E">priority</text>
+          <text x="220" y="117" text-anchor="middle" font-size="11.5" fill="#7A5C0E">flag set?</text>
+
+          <line x1="340" y1="106" x2="400" y2="60" stroke="#C1432E" marker-end="url(#ah7)"/>
+          <text x="352" y="72" font-size="12" fill="#C1432E">yes</text>
+          <rect x="400" y="24" width="260" height="52" rx="8" fill="#FBEAE6" stroke="#EFC3B8"/>
+          <text x="530" y="46" text-anchor="middle" fill="#8A2F1E" font-weight="600">force shortest-hop next-hop</text>
+          <text x="530" y="62" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#8A2F1E">ignores link_score entirely</text>
+
+          <line x1="340" y1="106" x2="400" y2="150" stroke="#2E8B57" marker-end="url(#ah7)"/>
+          <text x="352" y="150" font-size="12" fill="#2E8B57">no</text>
+          <rect x="400" y="130" width="260" height="52" rx="8" fill="#E7F4EC" stroke="#B7DEC5"/>
+          <text x="530" y="152" text-anchor="middle" fill="#215A3D" font-weight="600">quality-optimal next-hop</text>
+          <text x="530" y="168" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#215A3D">from distance-vector table</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>The only branch in the routing layer — everything upstream of it is shared.</figcaption>
+  </figure>
+
+  <h3>5.4 — Reliability layer</h3>
+  <p>Runs underneath both routing modes: every forwarded frame gets a hop-by-hop ACK; a missing ACK triggers a
+  bounded retransmit; a sequence-number-based duplicate filter drops repeats caused by retransmits or
+  multi-path delivery. Per-hop PDR for § 5.1 comes free from the ESP-NOW send callback's success/fail status —
+  no extra protocol needed.</p>
+</section>
+
+<!-- ============ 06 ROADMAP ============ -->
+<section id="roadmap">
+  <div class="section-head"><span class="section-num">06</span><h2>Parallel Build Roadmap</h2></div>
+  <p class="section-dek">Two people (or two sub-teams) working at once: one on the physical build, one on
+  firmware, meeting at defined sync points. 36-hour budget, hard cut-line at hour 23.</p>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 0–2</span><span class="phase-title">Bring-up</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Unbox and visually inspect all 5 boards</li>
+          <li>Wire pot + LDR on one board, bench-test with a plain <code>analogRead()</code> sketch</li>
+          <li>Confirm 3.3V rail and GND continuity with a multimeter before trusting any reading</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Install Arduino core <strong>3.x</strong> (IDF ≥ 5.1) on every dev machine</li>
+          <li>Flash the stock ESP-NOW example to two boards, confirm peering</li>
+          <li>Confirm <code>info→rx_ctrl→rssi</code> actually returns a nonzero value</li>
+          <li>Set and hard-code a fixed WiFi channel in the boot sequence</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync">SYNC — by hour 2: one board reads both sensors AND sends/receives ESP-NOW with RSSI. Merge before continuing.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 2–6</span><span class="phase-title">Multi-hop discovery, static routing, priority override</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Wire the remaining 4 boards identically to the bench-tested one</li>
+          <li>Label each board physically (S / A / B / C / D) — tape or marker</li>
+          <li>Set up the 5-node physical layout matching the topology diagram in § 01</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Implement neighbor discovery / peer registration across all 5 nodes</li>
+          <li>Implement distance-vector routing table (quality-optimal baseline)</li>
+          <li>Implement the priority-flag branch (§ 5.3) forcing shortest-hop</li>
+          <li>Verify on the dashboard that priority and normal packets take different routes</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync">SYNC — by hour 6: all 5 physical nodes power on in their final layout and exchange heartbeats.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 6–12</span><span class="phase-title">Fused link predictor</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Prepare the Faraday bag / metal enclosure for reproducible RF attenuation tests</li>
+          <li>Test attenuation strength on Node B — should degrade, not fully kill, the link</li>
+          <li>Start wiring the two OLEDs onto Nodes S and C</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Implement EWMA smoothing on RSSI (§ 5.1) — smooth first, differentiate second</li>
+          <li>Implement least-squares slope over window W</li>
+          <li>Implement PDR sliding window from send-callback status</li>
+          <li>Implement fused <code>link_score</code> with correct sign convention</li>
+          <li>Pin the timing table (heartbeat interval, W, timeout) from § 5.1</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync">SYNC — by hour 12: dropping the Faraday bag on Node B visibly moves link_score on the Serial monitor.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 12–17</span><span class="phase-title">Anomaly engine</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Finish OLED wiring on S and C, run I2C scanner to confirm address <code>0x3C</code></li>
+          <li>Mount potentiometers where they're easy to twist live during a demo</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Implement boot-time median/MAD calibration (§ 5.2) with the variance safety check</li>
+          <li>Implement the modified Z-score with a real ADC-noise MAD floor</li>
+          <li>Implement the separate flatline/stuck detector</li>
+          <li>Wire both flags to the OLED on Node C (SPIKE/JUMP vs STUCK, shown independently)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync">SYNC — by hour 17: twisting the pot on Node C shows SPIKE/JUMP; holding it still shows STUCK.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 17–23</span><span class="phase-title">Reliability layer — required, not stretch</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Secure all wiring with heat-shrink/tape — nothing should move during handling</li>
+          <li>Confirm power delivery is stable across all 5 nodes simultaneously (hub or batteries)</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Implement hop-by-hop ACK on every forwarded frame</li>
+          <li>Implement bounded retransmit on missing ACK</li>
+          <li>Implement sequence-number duplicate filter</li>
+          <li>Start logging Packet Recovery Ratio (§ 07 metric)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync"><b>CUT-LINE — hour 23.</b> Predictor, anomaly engine, priority override, and reliability layer must all be working by here. If behind, demote UCB1 (next phase) to "documented, not live" and move straight to demo staging.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 23–28</span><span class="phase-title">[Stretch] UCB1 bandit routing — only if ahead of schedule</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul><li>No hardware changes required for this phase</li></ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Implement UCB1 next-hop selection as an alternative to distance-vector</li>
+          <li>Gate it behind a compile flag so it can be disabled instantly if unstable</li>
+          <li>If not fully working by end of phase: keep the code, present as documented-but-optional</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 28–32</span><span class="phase-title">Live demo staging &amp; stress testing</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul>
+          <li>Rehearse the physical Faraday-bag drop over Node B repeatedly — confirm reproducibility</li>
+          <li>Rehearse twisting / freezing the Node C potentiometer cleanly</li>
+          <li>Stress-test power delivery over a full 10-minute continuous run</li>
+        </ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Finalize the Serial/WebSerial dashboard (plot RSSI, link_score, anomaly flags live)</li>
+          <li>Instrument and log the three evaluation metrics (§ 07) from real runs</li>
+          <li>Fix any race conditions surfaced by repeated demo runs</li>
+        </ul>
+      </div>
+    </div>
+    <div class="sync">SYNC — by hour 32: full 3-minute demo script (§ 08) runs start to finish without manual intervention beyond the scripted actions.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-head"><span class="phase-hours">Hours 32–36</span><span class="phase-title">Pitch polish &amp; panel practice</span></div>
+    <div class="phase-body">
+      <div class="phase-col hw"><span class="phase-col-label track hw">Hardware</span>
+        <ul><li>Final physical cleanup — visible wiring, labeled nodes, working spare board on hand</li></ul>
+      </div>
+      <div class="phase-col sw"><span class="phase-col-label track sw">Software</span>
+        <ul>
+          <li>Freeze the firmware — no code changes after this phase starts</li>
+          <li>Rehearse the judge Q&amp;A responses (§ 08) against the actual measured numbers</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 07 TESTING ============ -->
+<section id="testing">
+  <div class="section-head"><span class="section-num">07</span><h2>Testing &amp; Evaluation Metrics</h2></div>
+  <p class="section-dek">Do not present specific numbers to judges until they've actually been logged from
+  your own hardware — track these three live and quote real numbers on the day.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Metric</th><th>Definition</th><th>How to instrument it</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Reroute lead-time</strong></td><td>Time between the proactive reroute and when the heartbeat timeout would have fired.</td><td>Counterfactual — log the last-heartbeat timestamp, compute the timeout deadline you deliberately avoided, report <code>deadline − reroute_time</code>. It will not appear on its own.</td></tr>
+        <tr><td><strong>Packet Recovery Ratio (PRR%)</strong></td><td>Dropped packets successfully re-delivered via an alternate route, out of total dropped.</td><td>Count at the sink (Node S) — dropped-then-recovered ÷ total dropped, over a fixed test window.</td></tr>
+        <tr><td><strong>Anomaly false-positive rate</strong></td><td>False alarms during clean operation ÷ total baseline samples.</td><td>Run each node untouched for a fixed period post-calibration, count SPIKE/JUMP or STUCK flags that fired without a manual trigger.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Pre-flight checklist — before every demo run</h3>
+  <ul class="checklist">
+    <li><input type="checkbox" disabled> All 5 nodes power on and reach the main loop within 5 seconds</li>
+    <li><input type="checkbox" disabled> All 5 nodes report the same WiFi channel</li>
+    <li><input type="checkbox" disabled> Boot calibration completes without restarting on any node</li>
+    <li><input type="checkbox" disabled> Node S OLED and dashboard show live link_score for the current best path</li>
+    <li><input type="checkbox" disabled> Node C OLED is blank/idle (no false SPIKE/JUMP or STUCK) at rest</li>
+    <li><input type="checkbox" disabled> A normal packet and a priority packet visibly take different routes</li>
+    <li><input type="checkbox" disabled> Faraday bag over Node B produces a reroute within the expected lead-time window</li>
+    <li><input type="checkbox" disabled> Removing the Faraday bag lets Node B rejoin the healthy path again</li>
+    <li><input type="checkbox" disabled> Spare board and spare jumper wires within reach</li>
+  </ul>
+</section>
+
+<!-- ============ 08 DEMO ============ -->
+<section id="demo">
+  <div class="section-head"><span class="section-num">08</span><h2>Demo Staging &amp; Judging Script</h2></div>
+  <p class="section-dek">Three minutes, three visible moments, in this order.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Action</th><th>What it demonstrates</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">0:00–0:30</td><td>Drop the Faraday bag over Node B — no software controls touched.</td><td>The interactive failure: a sudden RF attenuation drop on the primary routing node.</td></tr>
+        <tr><td class="mono">0:30–1:30</td><td>Point to Node S's OLED / dashboard.</td><td>Proactive recovery: fused RSSI-slope and PDR score detects degradation and reroutes through C and D before the heartbeat timeout expires.</td></tr>
+        <tr><td class="mono">1:30–2:20</td><td>Twist the potentiometer on Node C sharply, then hold it dead still. Then fire a priority packet.</td><td>Edge intelligence + priority override: MAD Z-score flags the spike instantly; the flatline detector catches the frozen value; a priority message forces the shortest hop while normal traffic stays on the healthy path.</td></tr>
+        <tr><td class="mono">2:20–3:00</td><td>Sponsor framing close.</td><td>Ties the demo to Nokia SON principles and Keysight's Coexistence/Continuity pillars — see § 10 wording.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Pre-empt these judge questions</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        <tr><td>"RSSI is notoriously noisy — how can you trust it for routing?"</td><td>We EWMA-smooth RSSI first, then take the slope of the smoothed signal — not the raw derivative — and fuse it with a 20-frame packet-delivery-ratio window, so a noisy-but-still-delivering link doesn't trigger a false reroute.</td></tr>
+        <tr><td>"A Z-score can't detect a stuck sensor — it sits at the median. How do you catch that?"</td><td>Correct — that's why we run two detectors. The MAD Z-score catches spikes and jumps; a separate flatline detector counts consecutive unchanged samples to catch stuck values. Both flags are reported independently.</td></tr>
+        <tr><td>"Does your MAD Z-score assume a clean training phase?"</td><td>Yes — boot calibration assumes reasonably stable initial conditions. We check variance during the first ~100 samples and auto-restart calibration if it's out of a safe range.</td></tr>
+        <tr><td>"Why an LDR alongside the potentiometer?"</td><td>The pot gives a deliberate, controlled anomaly on demand. The LDR gives a real environmental disturbance — a shadow or occlusion — proving the same statistical detector generalizes across signal shapes, not just one hardcoded case.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 09 TROUBLESHOOTING ============ -->
+<section id="troubleshoot">
+  <div class="section-head"><span class="section-num">09</span><h2>Troubleshooting Matrix</h2></div>
+  <p class="section-dek">Symptom, likely cause, fix — in the order to check them.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>Analog readings are garbage or pinned only after the mesh starts</td><td>Sensor wired to an ADC2 pin — works fine before <code>WiFi.begin()</code>/ESP-NOW init, breaks after</td><td>Move to an ADC1 pin (32, 33, 34, 35, 36, 39) — GPIO34/35 in this build.</td></tr>
+        <tr><td>No RSSI value in the receive callback (always 0 or missing field)</td><td>Arduino-ESP32 core is 2.x, not 3.x</td><td>Upgrade board package to core 3.x (IDF ≥ 5.1) and update the callback signature to <code>esp_now_recv_info_t*</code>.</td></tr>
+        <tr><td>Nodes intermittently stop hearing each other</td><td>WiFi channel drifted on one node — anything touching WiFi STA/AP can cause this</td><td>Explicitly set the channel at boot on all five nodes; keep the dashboard on Serial/WebSerial (USB), not WiFi.</td></tr>
+        <tr><td>Anomaly detector fires constantly at rest, even on a healthy static sensor</td><td>MAD floored to an arbitrarily tiny value (e.g. 0.001) — normal ±1–2 LSB noise reads as a huge z-score</td><td>Floor MAD to a realistic ADC quantisation noise level (a few counts on a 12-bit ADC), not an arbitrary constant.</td></tr>
+        <tr><td>Anomaly detector never fires on a genuinely stuck sensor</td><td>Relying on the MAD Z-score alone — a frozen value sits at the median, giving z ≈ 0</td><td>Add the separate flatline/stuck-count detector; report both flags independently.</td></tr>
+        <tr><td>Rerouting triggers on a link that is actually improving</td><td>Sign convention error — using unsigned slope magnitude instead of signed</td><td>Keep <code>degrade_term</code> clamped to zero for positive (improving) slope; only a falling trend should ever lower <code>link_score</code>.</td></tr>
+        <tr><td>Priority packet takes the same route as normal traffic</td><td>Topology has no genuinely weaker shortest-hop path, so quality-optimal and shortest-hop coincide</td><td>Keep the direct A–S link deliberately weak/long, as specified in § 01 — this is required for the override to be visible.</td></tr>
+        <tr><td>Buzzer or OLED silently does nothing</td><td>Wired to an input-only pin (34/35/36/39), which cannot drive an output</td><td>Move digital outputs to a regular GPIO — GPIO25 for the buzzer in this build.</td></tr>
+        <tr><td>OLED not detected on I2C scan</td><td>Wrong SDA/SCL pins, or missing pull-ups on a non-breakout module</td><td>Confirm GPIO21 (SDA) / GPIO22 (SCL), confirm the module has onboard pull-ups, confirm address <code>0x3C</code>.</td></tr>
+        <tr><td>Board fails to boot after wiring a sensor</td><td>A pull resistor or external device on a strapping pin (0, 2, 12, 15)</td><td>Move the connection off strapping pins; none of this project's wiring should touch them.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 10 REFERENCES ============ -->
+<section id="references">
+  <div class="section-head"><span class="section-num">10</span><h2>References</h2></div>
+  <p class="section-dek">Verified against source. Used for algorithm justification and sponsor framing — cite by
+  number, not by inventing details beyond what's here.</p>
+
+  <h4>Transport</h4>
+  <p class="ref"><b>[1]</b> Espressif Systems, "ESP-NOW Wireless Communication Protocol," Espressif docs. <a href="https://www.espressif.com/en/solutions/low-power-solutions/esp-now" target="_blank">espressif.com/en/solutions/low-power-solutions/esp-now</a></p>
+
+  <h4>Link-quality estimation / prediction</h4>
+  <p class="ref"><b>[2]</b> "Estimating and predicting link quality in wireless IoT networks," <em>Annals of Telecommunications</em>, Springer, 2021. DOI 10.1007/s12243-021-00835-1.</p>
+  <p class="ref"><b>[3]</b> "Assessing Link Quality in IEEE 802.11 Wireless Networks," PIMRC, 2008. <a href="https://cs.ucr.edu/~krish/pimrc08.pdf" target="_blank">cs.ucr.edu/~krish/pimrc08.pdf</a></p>
+  <p class="ref"><b>[4]</b> "Improving the Accuracy Rate of Link Quality Estimation Using Fuzzy Logic in Mobile Wireless Sensor Network" (describes WMEWMA), Hindawi <em>Advances in Fuzzy Systems</em>, 2019.</p>
+  <p class="ref"><b>[5]</b> N. Baccour, A. Koubâa, H. Youssef, M. Ben Jamâa, D. do Rosário, M. Alves, L. B. Becker, "F-LQE: A Fuzzy Link Quality Estimator for Wireless Sensor Networks," EWSN 2010, LNCS vol. 5970, pp. 240–255, Springer.</p>
+
+  <h4>Anomaly detection (statistical + on-device)</h4>
+  <p class="ref"><b>[6]</b> B. Iglewicz and D. C. Hoaglin, <em>How to Detect and Handle Outliers</em>, ASQC Basic References in Quality Control, vol. 16, 1993 — source of the 0.6745 constant and the 3.5 modified-Z threshold.</p>
+  <p class="ref"><b>[7]</b> A. Albaiz, F. Amsaad, "Fully Autonomous Z-Score-Based TinyML Anomaly Detection on Resource-Constrained MCUs Using Power Side-Channel Data," arXiv:2604.08581, 2026.</p>
+  <p class="ref"><b>[8]</b> "Outlier Detection in Time-Series Receive Signal Strength Observation Using Z-Score Method with Sn Scale Estimator for Indoor Localization," <em>MDPI Applied Sciences</em>, vol. 13, no. 6, art. 3900, 2023.</p>
+
+  <h4>Self-healing mesh + reliability</h4>
+  <p class="ref"><b>[9]</b> D. Arregui Almeida et al., "Gateway-Free LoRa Mesh on ESP32: Design, Self-Healing Mechanisms, and Empirical Performance," <em>MDPI Sensors</em>, vol. 25, no. 19, art. 6036, 2025. DOI 10.3390/s25196036 — reports ≈88% packet-recovery via hop-by-hop ACK + retransmit + alternate-link triggering; a fair yardstick, but quote your own measured figure.</p>
+
+  <h4>Learning-based routing</h4>
+  <p class="ref"><b>[10]</b> "Multi-Armed Bandit Algorithms in Next-Generation Wireless Networks: A Lightweight, Stateless Alternative to Reinforcement Learning," Tutorial TUT-02, IEEE CCNC, 2026.</p>
+
+  <h4>ESP32 hardware reference (this document)</h4>
+  <p class="ref"><b>[11]</b> Espressif / Arduino-ESP32 core documentation — ADC1 vs. ADC2 behavior under active WiFi, default I2C pin assignment (GPIO21/22), and the <code>esp_now_recv_info_t</code> callback signature introduced in core 3.x.</p>
+</section>
+
+</div>
+
+<footer>
+  <span>Predictive Self-Healing IoT Mesh — Implementation Guide</span>
+  <span>Sections 01–10 · hardware and software tracks run in parallel</span>
+</footer>
+
+</body>
+</html>
