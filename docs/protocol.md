@@ -134,6 +134,31 @@ lead-time metric (§07 — "log the last-heartbeat timestamp ... report
 `deadline - reroute_time`") and future staleness detection on a link's most
 recent heartbeat.
 
+**The reroute lead-time metric is now real** (2026-08-18 implementation
+pass) — `telemetry.cpp::onRouteEvent()` populates `EVENT ROUTE_CHANGE`'s
+`details.leadTimeMs`, but only for a genuine, real, proactive score-driven
+reroute (`reason == LINK_DEGRADATION_R`), computed entirely from real
+timestamps and one real, existing constant:
+`leadTimeMs = max(0, ROUTING_ENTRY_TIMEOUT_MS - (now - routing::getNeighborLastSeenMs(oldNextHop)))`
+— "how much sooner did the proactive reroute act, compared to what
+routing's own independent silence-based hard fallback would eventually
+have forced anyway." Never extrapolated/estimated; omitted entirely (not
+fabricated as 0) for any other reroute reason. Full reasoning in
+[decisions.md](decisions.md#real-measured-never-extrapolated-prediction-lead-time).
+
+### Three (really four) distinct sequence/timestamp identities — never conflate these
+
+This project now has multiple, genuinely different "sequence number" and
+"timestamp" concepts, deliberately kept separate everywhere they could be
+confused:
+
+| Identity | Type | Meaning | Where |
+|---|---|---|---|
+| `MeshPacket.sequence` | uint16, per-source | wire packet identity, with `source` — see above | every hop, unchanged |
+| `apptraffic_core`'s `appSeq` | uint16, `NODE_A`-only counter | which application-layer POT/LDR sample this is | encoded inside `MSG_DATA`'s payload bytes; decoded live at the sink as of this pass — see `PACKET.appSeq` in `docs/gui-compatibility-matrix.md` |
+| telemetry envelope `seq` | uint32, per-node, per-boot | which telemetry JSON *message* this is (GUI sequence-gap detection) | every telemetry line's own envelope, distinct from any `MeshPacket` |
+| `PACKET.appTimestampMs` | uint32 | the *originating* node's own `millis()` at the moment `apptraffic::sendOne()` called `encodeData()` | new (2026-08-18), decoded from real payload bytes, distinct from `MeshPacket.timestamp_ms` (rewritten every hop) and from telemetry's own `envelope.timestampMs` (the *reporting* node's local time) |
+
 ## Route-advertisement payload (Phase 1, rides inside `MSG_HEARTBEAT`)
 
 `MSG_HEARTBEAT` doubles as both the HELLO beacon (its arrival proves the

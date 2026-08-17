@@ -212,6 +212,52 @@ struct StatisticsPayload {
 };
 size_t buildStatistics(const Envelope& env, const StatisticsPayload& p, char* buf, size_t bufSize);
 
+// ---- 0x0B PACKET ----
+// Real application/mesh packet movement, generated only from the real
+// reliability event stream (reliability::ReliabilityEvent) — never a
+// parallel simulator inside firmware. Three distinct identity axes exist
+// in this project and must never be confused (see docs/decisions.md and
+// reliability_core.h's own file header for the first two):
+//   meshSequence — MeshPacket's own (source, sequence) identity
+//     (reliability_core::PacketId). Preserved unchanged across every hop
+//     of a forward — the same value at every node this packet passes
+//     through.
+//   appSeq — apptraffic_core's own, separate, application-level counter,
+//     carried *inside* MSG_DATA's payload bytes. Only known here when
+//     `hasAppSeq` is true — i.e. only on the real sink, only for a real
+//     MSG_DATA payload that apptraffic_core::decodeData() actually
+//     decoded successfully. Never invented for a relay hop that only ever
+//     saw opaque bytes, or for a non-DATA event.
+//   (this struct does not carry telemetry's own envelope `seq` — that's
+//     supplied automatically by wEnvelopeOpen(), a third, separate axis.)
+struct PacketPayload {
+  uint16_t meshSequence;
+  bool hasAppSeq;
+  uint16_t appSeq;
+  // Real decoded application content (apptraffic_core::DecodedData) —
+  // present only alongside hasAppSeq (same gate: a real, successfully
+  // decoded DATA payload). `appTimestampMs` is the ORIGINATING node's own
+  // millis() at send time — a fourth, distinct timestamp axis from this
+  // message's own envelope.timestampMs (the REPORTING node's local time)
+  // and from MeshPacket.timestamp_ms (rewritten every hop) — never
+  // conflated, per Part 3's explicit identity-separation requirement.
+  bool hasSensorValues;
+  uint16_t potValue;
+  uint16_t ldrValue;
+  uint32_t appTimestampMs;
+  const char* source;
+  const char* destination;
+  const char* currentNode;
+  const char* nextHop;          // real direct neighbor this hop concerns; nullptr if not meaningful (see status)
+  const char* const* path;      // real, reconstructed [self,...,destination] path; nullptr if not available (never fabricated — same honesty rule as ROUTE_UPDATE's own hops)
+  uint8_t pathLen;
+  const char* trafficClass;     // NORMAL/PRIORITY
+  bool priority;
+  const char* status;           // SENT/RETRIED/DELIVERED/FAILED/RECEIVED — see docs/protocol.md for the exact reliability-event mapping
+  uint8_t attemptCount;
+};
+size_t buildPacket(const Envelope& env, const PacketPayload& p, char* buf, size_t bufSize);
+
 // ---- 0x0A ERROR ----
 struct ErrorPayload {
   const char* severity;  // ERROR/CRITICAL

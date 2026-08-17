@@ -33,8 +33,9 @@ implementation-guide.html found:
    `0x3C` is expected by the Adafruit_SSD1306 API) — very likely causes
    `display.begin()` to fail on real hardware even with correct wiring.
    Not fixed here (belongs to the hardware team's own file, out of this
-   session's scope) — flagged for the team. Firmware's own
-   `OLED_I2C_ADDRESS` constant is already correct (`0x3C`), unaffected.
+   session's scope) — flagged for the team. Firmware's own address for
+   Node S (`OLED_I2C_ADDRESS_S`) is `0x3C`, matching this reasoning.
+   **Node C is different** — see the 2026-08-18 update below.
 2. **Real contradiction between the guide's BOM and the hardware
    evidence:** the guide specifies 2x *identical* 0.96" SSD1306 displays;
    the hardware team has bench-tested two *different* controllers (0.96"
@@ -47,9 +48,15 @@ different physical modules, a real deviation from the guide's "2x
 identical" BOM. `src/oled/oled.cpp` selects the matching Adafruit driver
 per `THIS_NODE_ID` at runtime (never a per-node compile flag — see
 [decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot)).
-Firmware's own `OLED_I2C_ADDRESS` (`0x3C`) is used for both drivers
-regardless — the 0.96" sketch's likely-wrong `0x78` is that bench sketch's
-own bug, not something firmware inherited.
+
+**Update, 2026-08-18 — I2C addresses split per node, team-corrected:** the
+two drivers do **not** share one address. Node S (SSD1306) uses
+`OLED_I2C_ADDRESS_S` = `0x3C`. Node C (SH1106) uses `OLED_I2C_ADDRESS_C` =
+`0x78` — a real, directly team-confirmed hardware value that overrides
+this document's own earlier "0x78 on the PCB means 0x3C in Arduino"
+inference for that same 1.3" module. Trusted as a direct hardware fact,
+same standing as the real MAC table. See
+[decisions.md](decisions.md#oled-i2c-addresses-split-per-node-team-corrected-2026-08-18).
 
 Full detail, including the exact sketch excerpts and reasoning:
 [hardware-readiness.md](hardware-readiness.md)'s Part 3/4/5 section and
@@ -70,10 +77,10 @@ but the following cannot be validated until boards are actually flashed:
 - [ ] Actual RSSI validation (`info->rx_ctrl->rssi` returning real, sane values on core 3.x)
 - [ ] Actual WiFi channel validation (do all five boards actually agree on `MESH_WIFI_CHANNEL` in practice?)
 - [ ] Actual ADC validation (`analogRead()` on GPIO34/35 behaving correctly with ESP-NOW active — this is exactly the ADC2-after-radio-init trap documented in `docs/parameters.md`)
-- [ ] Actual OLED validation (Node S's SSD1306 and Node C's SH1106 both
-      answering at `0x3C` on GPIO21/22, and `src/oled/oled.cpp` actually
-      driving them — code exists and compiles clean as of 2026-08-18, but
-      has never run against a real display)
+- [ ] Actual OLED validation (Node S's SSD1306 answering at `0x3C`, Node
+      C's SH1106 answering at `0x78`, both on GPIO21/22, and
+      `src/oled/oled.cpp` actually driving them — code exists and compiles
+      clean as of 2026-08-18, but has never run against a real display)
 - [ ] Actual buzzer validation (GPIO25 driving the piezo module)
 
 Software validation for Phase 0 consisted of compilation, static

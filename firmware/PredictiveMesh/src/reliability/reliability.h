@@ -45,7 +45,9 @@ struct ReliabilityEvent {
   NodeId source;          // original packet source (Part 1 identity) — always meaningful
   uint16_t sequence;       // original packet sequence (Part 1 identity) — always meaningful
   NodeId neighbor;         // direct neighbor this hop concerns: next_hop for TX-side events, prev_hop for RX-side events
-  uint8_t attemptCount;     // meaningful for PACKET_TX/PACKET_ACK/PACKET_RETRY/PACKET_DROP; 0 for RX-side events
+  NodeId destination;      // the packet's real final destination (Part 1 identity's third field) — always meaningful; added so a telemetry consumer can report a real PACKET path without re-deriving it from routing state
+  bool priority;            // the packet's real MeshPacket.priority flag — always meaningful; lets a telemetry consumer report real trafficClass (NORMAL/PRIORITY) instead of guessing
+  uint8_t attemptCount;     // meaningful for PACKET_TX/PACKET_ACK/PACKET_RETRY/PACKET_DROP; for PACKET_ACK/PACKET_DELIVERED this is the real, final attempt count reliability_core::AckResult reported (1 = first-try, >1 = recovered after real retries) — never hardcoded; 0 for RX-side events
   const uint8_t* payload;   // valid only for PACKET_RECEIVED, and only for the duration of the callback — copy if needed after it returns
   uint8_t payloadLen;       // valid only for PACKET_RECEIVED
 };

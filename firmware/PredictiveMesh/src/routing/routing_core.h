@@ -80,6 +80,13 @@ bool applyRouteAdvertisement(RoutingState& state, NodeId from,
                               const RouteAdEntry* entries, uint8_t count,
                               uint32_t now);
 
+// Read-only: real last_seen_ms timestamp for `neighbor` (see
+// noteNeighborSeen()), 0 if out-of-range or never observed. For
+// diagnostic/telemetry consumers only — never used by any routing
+// decision. See routing.h::getNeighborLastSeenMs() for the adapter
+// wrapper.
+uint32_t neighborLastSeenMs(const RoutingState& state, NodeId neighbor);
+
 // Sweeps neighbor and route-candidate entries older than timeoutMs and
 // marks them invalid (never silently deletes/reuses the slot — it stays
 // present but invalid, satisfying "route expiry/invalidation implemented"

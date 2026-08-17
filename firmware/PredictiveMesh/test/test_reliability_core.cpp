@@ -138,6 +138,7 @@ void test_matching_ack_resolves_pending_tx() {
   check(r.matched, "a real ACK for a tracked identity matches");
   check(r.nextHop == NEIGHBOR, "the matched ACK reports the correct next-hop neighbor");
   check(r.latencyMs == 42, "latency is measured from the most recent send to the matching ACK (1042 - 1000 = 42)");
+  check(r.attemptCount == 1, "a match with no intervening retry reports attemptCount 1 (first-try delivery)");
   check(s.stats.packetsDelivered == 1, "packetsDelivered increments on a real match");
   check(s.stats.acknowledgements == 1, "acknowledgements increments on a real match");
   check(s.stats.lastLatencyMs == 42, "lastLatencyMs reflects the just-resolved hop-transmission");
@@ -245,6 +246,7 @@ void test_part9_one_packet_two_retries_then_success() {
   AckResult r = onAckReceived(s, NODE_A, 1, now);
 
   check(r.matched, "the final attempt is acknowledged before it would have timed out");
+  check(r.attemptCount == 3, "attemptCount reports the real, final attempt number (1 original + 2 retries = 3) that the ACK actually resolved — lets telemetry honestly distinguish a recovered delivery from a first-try one");
   check(s.stats.packetsSent == 1, "1 original packet — packetsSent counts the whole series once, not per attempt");
   check(s.stats.retries == 2, "2 retries — matches Part 9's worked example exactly");
   check(s.stats.acknowledgements == 1, "acknowledgements counts the one real ACK that resolved the series");

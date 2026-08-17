@@ -198,9 +198,29 @@ void tick() {
     sendBeacon();
   }
 
+  // Snapshot neighbor liveness before the sweep so a real HEALTHY->SILENT
+  // transition can be reported below - reuses expireStale()'s own existing
+  // ROUTING_ENTRY_TIMEOUT_MS sweep (no second, independent timeout system;
+  // see docs/decisions.md). Direct field access on g_state is the same
+  // established pattern predictor.cpp/telemetry.cpp already use to read
+  // *_core state for reporting purposes - never used here to make a
+  // routing decision, only to detect a real state transition.
+  bool wasValid[NODE_ID_COUNT];
+  for (uint8_t n = 0; n < NODE_ID_COUNT; n++) wasValid[n] = g_state.neighbors[n].valid;
+
   uint8_t invalidated = routing_core::expireStale(g_state, now, ROUTING_ENTRY_TIMEOUT_MS);
   if (invalidated > 0) {
     logger::warn("routing: expired %u stale neighbor/route entry(ies)", static_cast<unsigned>(invalidated));
+
+    for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
+      if (n == THIS_NODE_ID) continue;
+      if (wasValid[n] && !g_state.neighbors[n].valid) {
+        logger::warn("routing: neighbor %s went silent (no packet for > %u ms)", nodeName(static_cast<NodeId>(n)),
+                      static_cast<unsigned>(ROUTING_ENTRY_TIMEOUT_MS));
+        fireEvent(RouteEventType::NEIGHBOR_SILENT, static_cast<NodeId>(n), NODE_ID_UNKNOWN, 0, false);
+      }
+    }
+
     for (uint8_t d = 0; d < NODE_ID_COUNT; d++) {
       if (d == THIS_NODE_ID) continue;
       uint8_t hop = 0;
@@ -238,6 +258,10 @@ uint8_t getCandidates(NodeId destination, routing_core::CandidateInfo* out, uint
     unhealthy[n] = predictor::isUnhealthy(static_cast<NodeId>(n));
   }
   return routing_core::enumerateCandidates(g_state, destination, unhealthy, NODE_ID_UNKNOWN, out, maxOut);
+}
+
+uint32_t getNeighborLastSeenMs(NodeId neighbor) {
+  return routing_core::neighborLastSeenMs(g_state, neighbor);
 }
 
 void setEventCallback(RouteEventCallback cb) {

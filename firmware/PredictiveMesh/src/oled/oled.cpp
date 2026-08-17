@@ -192,7 +192,7 @@ void init() {
   bool ok = false;
   if (THIS_NODE_ID == NODE_S) {
     g_roleHint = "MESH TELEMETRY";
-    ok = g_ssd1306.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS);
+    ok = g_ssd1306.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS_S);
     g_display = &g_ssd1306;
     g_driver = Driver::SSD1306;
 
@@ -203,7 +203,7 @@ void init() {
     oled_core::init(g_state, kScreensS, 2);
   } else if (THIS_NODE_ID == NODE_C) {
     g_roleHint = "ANOMALY FLAG";
-    ok = g_sh1106.begin(OLED_I2C_ADDRESS, true);
+    ok = g_sh1106.begin(OLED_I2C_ADDRESS_C, true);
     g_display = &g_sh1106;
     g_driver = Driver::SH1106;
 

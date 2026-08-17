@@ -298,8 +298,15 @@ in Arduino"`, then correctly uses `0x3C`) — the fix, if needed, is a
 one-line change in the 0.96" sketch, but **that sketch is the hardware
 team's own file, not part of `firmware/PredictiveMesh/`** — flagging this
 for the team rather than silently editing hardware-test code outside this
-project's own firmware tree. (Firmware's own `OLED_I2C_ADDRESS`, `config.h`,
-is already `0x3C` — correct, unaffected by this.)
+project's own firmware tree. **Update, 2026-08-18:** the team has since
+directly confirmed the real per-node addresses against actual hardware —
+Node S (SSD1306) is `0x3C`, matching the reasoning above; Node C (SH1106)
+is `0x78`, which does **not** match this section's original "0x78 on the
+PCB means 0x3C in Arduino" reasoning for that same 1.3" module. Firmware
+now uses two separate constants, `OLED_I2C_ADDRESS_S`(`0x3C`) and
+`OLED_I2C_ADDRESS_C`(`0x78`), trusting the team's direct hardware
+confirmation over this section's own earlier inference. See
+[decisions.md](decisions.md#oled-i2c-addresses-split-per-node-team-corrected-2026-08-18).
 
 **Finding 2 (real, CONFIRMED contradiction, source-of-truth vs. hardware
 evidence — resolved 2026-08-18): implementation-guide.html's BOM specifies

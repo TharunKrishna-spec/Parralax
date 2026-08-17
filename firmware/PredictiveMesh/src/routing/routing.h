@@ -26,6 +26,7 @@ enum class RouteEventType : uint8_t {
   ROUTE_SELECTED,     // a next-hop decision was just made for an outgoing packet
   ROUTE_CHANGED,      // an incoming advertisement changed a stored candidate
   ROUTE_INVALIDATED,  // staleness expiry left a destination with no valid route
+  NEIGHBOR_SILENT,    // a direct neighbor's own liveness (not a route candidate) just crossed ROUTING_ENTRY_TIMEOUT_MS — see routing.cpp::tick(). `destination` field carries the silent neighbor's NodeId; next_hop/hop_count/priority are unused (NODE_ID_UNKNOWN/0/false).
 };
 
 struct RouteEvent {
@@ -70,6 +71,15 @@ NodeId selectNextHop(const MeshPacket& pkt);
 // full candidate set, not just the one winning pick — never influences
 // routing itself. Returns the count written (<= maxOut).
 uint8_t getCandidates(NodeId destination, routing_core::CandidateInfo* out, uint8_t maxOut);
+
+// Read-only: real millis() timestamp `neighbor` was last directly heard
+// from (see routing_core::noteNeighborSeen()), 0 if never observed. For
+// diagnostic/telemetry consumers only (e.g. deriving a real, measured
+// prediction lead-time against routing's own ROUTING_ENTRY_TIMEOUT_MS
+// hard fallback) — never used by, and never influences, any routing
+// decision itself. Mirrors getCandidates()'s existing side-effect-free
+// accessor pattern.
+uint32_t getNeighborLastSeenMs(NodeId neighbor);
 
 // Registers a callback for ROUTE_SELECTED/ROUTE_CHANGED/ROUTE_INVALIDATED
 // events. Later phases (predictor-triggered rerouting, telemetry/dashboard)

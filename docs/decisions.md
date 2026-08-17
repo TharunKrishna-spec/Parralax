@@ -3298,3 +3298,405 @@ entries go at the bottom. Format:
   (`docs/gui-compatibility-matrix.md`). Zero code changes — `.slope`'s real
   value, and every consumer of it, is unchanged. No test/compile impact.
 - **Phase/date:** Full feature/bug audit pass, 2026-08-18.
+
+## OLED I2C addresses split per node, team-corrected (2026-08-18)
+
+- **Decision:** Replaced the single shared `OLED_I2C_ADDRESS`(`0x3C`)
+  constant with two node-specific ones: `OLED_I2C_ADDRESS_S`(`0x3C`, Node
+  S's SSD1306) and `OLED_I2C_ADDRESS_C`(`0x78`, Node C's SH1106) —
+  `src/config.h`. `src/oled/oled.cpp`'s two `display.begin()` call sites
+  updated to use the matching constant per driver.
+- **Reason:** The team directly provided the real, hardware-determined
+  addresses: 0.96" (Node S) = `0x3C`, 1.3" (Node C) = `0x78`. This
+  confirms Node S's address (matches this project's own prior bench-sketch
+  reasoning), but **overrides** Node C's — the OLED integration pass
+  earlier this same day had used `0x3C` for Node C too, reasoning from the
+  1.3" hardware bring-up sketch's own comment ("0x78 printed on the PCB
+  translates to 7-bit 0x3C in Arduino"). The team's direct, hardware-
+  confirmed value takes precedence over that inference, the same way the
+  real MAC table (Phase 7) took precedence over any earlier placeholder
+  reasoning — a real fact from the people with the actual hardware in
+  hand beats a plausible-sounding derivation. `0x78` is unusual as a bare
+  7-bit I2C address (0x78-0x7B is the I2C spec's reserved 10-bit-
+  addressing prefix range, which is exactly why the bench sketch's own
+  author reasoned it must mean "0x3C, 8-bit-shifted") — flagged in
+  `config.h`'s own comment as the first thing to re-check with a real I2C
+  scanner if `display.begin()` ever fails on Node C, rather than silently
+  trusted without comment.
+- **Alternatives considered:** (a) Keep `0x3C` for both, treating the
+  team's `0x78` as a restatement of the silkscreen-printed (not
+  Arduino-API) value, same as the bench sketch's own comment. (b) Ask a
+  clarifying question before changing anything.
+- **Why alternatives were rejected:** (a) would silently override a
+  direct, explicit correction with an inference from an unrelated file —
+  exactly the kind of guess CLAUDE.md's "don't invent hardware values"
+  rule exists to prevent. (b) was considered but rejected as
+  disproportionate: `oled::init()` already fails soft (logs a warning,
+  leaves the display dark) rather than hanging on a wrong address, so the
+  cost of trusting the team's stated value and being wrong is low and
+  cheaply recoverable (one constant, no hardware risk) — asking would
+  have blocked forward progress for a low-stakes, easily-reversible
+  value the team stated plainly and directly.
+- **Impact:** `src/config.h` (2 lines -> 2 renamed+re-valued constants),
+  `src/oled/oled.cpp` (2 call sites). Real ESP32 compile re-verified clean,
+  byte-identical to before the change (957,292/50,376 bytes,
+  `ENABLE_UCB1=0`) — a compile-time constant swap changes no code size.
+  Full 382/382 host regression re-run clean (unaffected — no host test
+  touches this Arduino-only constant). `docs/parameters.md`,
+  `docs/hardware-readiness.md`, `docs/known-issues.md` updated to match.
+- **Phase/date:** Post-audit hardware correction, 2026-08-18.
+
+## Replacement GUI audited (2026-08-18) — Phase 12 of `docs/full-system-audit.md` rebuilt, no firmware change made
+
+- **Decision:** Read the replacement GUI file
+  (`gui-main/gui-main/mesh-command-console (1).html`, which replaced the
+  originally-audited `mesh-command-console.html`) and its new
+  `gui-main/gui-main/docs/manual.md` in full, function-by-function,
+  cross-referenced against `telemetry.cpp`/`telemetry_core.cpp` (also
+  re-read). Rebuilt `docs/full-system-audit.md`'s Phase 12 (and its
+  cross-references in Phases 14/16/19/20) from that fresh read rather than
+  assuming the original Phase 12 still applied. **No firmware or GUI code
+  was changed** — audit only, matching the explicit instruction this pass.
+- **Reason:** A new GUI landed in the working tree mid-session (old file
+  deleted, new file added) and the user asked for a checklist covering it,
+  with an explicit "make no mistakes" — this is exactly the kind of claim
+  this project's own standing rule (verify, don't inherit, don't trust a
+  prior audit or a doc's own description of itself) exists for. The new
+  GUI's own manual was checked *against its actual code*, not trusted as
+  ground truth for what the code does.
+- **Key findings** (full detail in `full-system-audit.md` Phase 12):
+  1. The core telemetry parser (`applyTelemetryCore()`) is
+     character-for-character identical to the original GUI's
+     `applyTelemetry()` — every original field-level finding
+     (`rssiSlopeDbPerSec` naming, single-node telemetry source, absent
+     `leadTimeMs`) carries over unchanged, confirmed by direct comparison.
+  2. **Real improvement, confirmed by tracing the code, not assumed:** an
+     outer `applyTelemetry()` wrapper now calls `setRoute()` a second time
+     with the real, untruncated `ROUTE_UPDATE.active.hops` array,
+     resolving the `ABS`/`ACDS`/`AS`-only topology-animation limitation
+     this project has carried as an open item since Phase 6.
+  3. **Real gap, new this pass:** the replacement GUI's own manual
+     documents a `PACKET` message type and an extended `EVENT.eventType`
+     vocabulary (`NODE_SILENT`, `TIMEOUT_FALLBACK`, `REROUTE_PROPOSED`,
+     `PACKET_RECOVERED`, `DUPLICATE_SUPPRESSED`, and others) that
+     `telemetry.cpp` does not implement — confirmed by enumerating every
+     real `emitEvent()` call site (8 distinct `eventType` values exist;
+     the manual documents 13, only 2 matching by exact name). The GUI's
+     core panels (topology, link health, prediction, sensor state) do not
+     depend on this missing vocabulary and work correctly regardless; only
+     specific decision-HUD/packet-flow-animation flourishes stay dormant
+     (never fabricated) in live mode without it.
+  4. Live/replay/demo data-provenance safety (no path where simulated data
+     could be mistaken for real) was independently re-verified against
+     this file's actual guard clauses (`runDemo()`'s `state.mode!=='sim'`
+     check, `prepareLive()`'s field reset, the 120ms provenance-badge
+     resync) — confirmed still true, not merely assumed from the manual's
+     "truth rules" section.
+- **Alternatives considered:** (a) Assume the original Phase 12 findings
+  still applied without re-reading the new file. (b) Trust the new
+  manual's own description of the GUI's behavior instead of reading the
+  actual `<script>` content.
+- **Why alternatives were rejected:** (a) would have missed both the real
+  improvement (finding 2) and the real new gap (finding 3) — a 116KB file
+  replacing a 36KB one is not a safe assumption to skip verifying. (b) is
+  exactly the failure mode this session's own audits have repeatedly
+  guarded against — a manual is a claim about the code, not the code
+  itself; this pass found real, material discrepancies between the two
+  (finding 3), which would have been missed by trusting the manual alone.
+- **Impact:** Documentation only — `docs/full-system-audit.md` (Phase 12
+  rebuilt, Phases 14/16/19/20 cross-references updated),
+  `docs/gui-compatibility-matrix.md` (note added, field mappings
+  unchanged since they still hold). Zero firmware or GUI code touched.
+  `gui-main/` remains off-limits per standing project rule; the file
+  itself still carries a stray `(1)` suffix in the working tree, not
+  renamed by this session.
+- **Phase/date:** Post-OLED-integration GUI audit, 2026-08-18.
+
+## Full implementation pass closing the audit's capability gaps (2026-08-18) — PACKET telemetry, 5 new EVENT types, real lead-time, live sink decode, multi-node bridge
+
+Implements the confirmed gaps from the same-day full-system-audit and
+GUI-capability audit, per explicit "full implementation mode" instruction.
+`gui-main/` was never edited (standing rule, unchanged) — every capability
+was delivered either as real firmware telemetry the GUI's *existing*,
+unmodified code already knows how to consume, or as a new tool living
+outside `gui-main/`.
+
+### `reliability::ReliabilityEvent` gains `destination` and `priority`
+- **Decision:** Added both fields to the adapter-level event struct
+  (`reliability.h`), threaded through all 10 `fireEvent()` call sites in
+  `reliability.cpp` from the real `MeshPacket`/`g_pendingPackets[]` state
+  already available at each site (the same `g_pendingPackets[slot]`
+  lookup UCB1's own reward wiring already established as a safe pattern).
+- **Reason:** The new `PACKET` telemetry message needs a packet's real
+  destination and real priority flag; neither existed on the event struct
+  before. `reliability_core` itself is unchanged (payload/identity-
+  agnostic by design, per its own file header) — this is adapter-only.
+- **Alternatives considered:** Re-deriving destination/priority at the
+  telemetry layer by re-querying routing state. **Rejected:** routing
+  doesn't track per-packet destination/priority at all (it's a property
+  of the packet, not the route) — the only real source is the packet
+  bytes reliability.cpp already has in hand at each event site.
+- **Impact:** `reliability.h`, `reliability.cpp` (10 call sites). No
+  `reliability_core` change, no existing host test affected. Real ESP32
+  compile clean.
+
+### `reliability_core::AckResult` gains `attemptCount`
+- **Decision:** `onAckReceived()` now captures the pending slot's real
+  `attemptCount` before clearing it, returned in `AckResult`.
+- **Reason:** `PACKET_RECOVERED` (Part 8) needs to distinguish "delivered
+  on the first try" from "delivered only after real retries" — the exact,
+  real number was already being tracked and discarded.
+- **Alternatives considered:** Re-deriving "was this retried" from
+  `Statistics.retries` (a cumulative, node-wide counter). **Rejected:**
+  not per-packet — could not distinguish which specific delivery needed
+  the retry.
+- **Impact:** `reliability_core.h/.cpp`, 2 new host checks (90/90 total,
+  was 88/88).
+
+### Real `NODE_SILENT` via routing's own existing timeout, not a new one
+- **Decision:** `routing::RouteEventType::NEIGHBOR_SILENT` (new value),
+  fired from `routing.cpp::tick()` by snapshotting `g_state.neighbors[n].valid`
+  before calling the *existing, unchanged* `routing_core::expireStale()`
+  and comparing after — a real HEALTHY->SILENT transition, detected via
+  the adapter directly reading `*_core` state fields for reporting
+  purposes (the same established pattern `predictor.cpp`/`telemetry.cpp`
+  already use), never a routing decision.
+- **Reason:** Part 5 explicitly required reusing the existing staleness
+  architecture, not inventing a second timeout system.
+- **Alternatives considered:** Extending `expireStale()`'s own signature
+  with output parameters to report which neighbors went silent.
+  **Rejected in favor of the simpler adapter-side snapshot-diff:** avoids
+  touching `routing_core`'s signature/tests at all, and the adapter
+  already has free, direct read access to the same state.
+- **Impact:** `routing.h` (new enum value), `routing.cpp` (`tick()`).
+  `routing_core` untouched. `routing::getNeighborLastSeenMs()` added as a
+  new, separate, read-only accessor (`routing_core::neighborLastSeenMs()`,
+  5 new host checks — 42/42, was 37/37) for the lead-time computation
+  below and for `NODE_SILENT`'s own `silentForMs` field.
+
+### `REROUTE_PROPOSED` — only on a real, different, viable candidate
+- **Decision:** `telemetry.cpp::onLinkEvent()`, on `LINK_DEGRADING`,
+  queries `routing::getCandidates(NODE_S, ...)` (existing, side-effect-
+  free accessor) and only emits `REROUTE_PROPOSED` when the degrading
+  neighbor is itself a current candidate AND a different one exists.
+- **Reason:** Part 7 explicitly forbade emitting this merely because a
+  score changed. NODE_S is this project's one real destination
+  (apptraffic's fixed `A -> S` flow); querying it from any other node
+  correctly self-excludes via `enumerateCandidates()`'s own existing
+  `destination == state.self` guard.
+- **Alternatives considered:** Emitting on every `LINK_DEGRADING`
+  unconditionally. **Rejected** — exactly the fabrication Part 7 forbade.
+- **Impact:** `telemetry.cpp` only. No new `*_core` function (reuses
+  `routing::getCandidates()`, already tested via `routing_core`'s own
+  `enumerateCandidates()` suite).
+
+### `TIMEOUT_FALLBACK` and `PACKET_RECOVERED` derived from existing `attemptCount`, no new field
+- **Decision:** `onReliabilityEvent()` emits `TIMEOUT_FALLBACK` on a real
+  `PACKET_DROP` with `attemptCount > 1`, and `PACKET_RECOVERED` on a real
+  `PACKET_DELIVERED` with `attemptCount > 1`.
+- **Reason:** `attemptCount > 1` is *already* an unambiguous, real signal
+  for "this drop came from genuine retry-exhaustion, not a pool-full or
+  synchronous-rejection drop" — the other two `PACKET_DROP` call sites in
+  `reliability.cpp` always report `0`/`1` respectively, never more. No new
+  boolean/reason field was needed to satisfy Part 6's "clearly distinguish
+  retry / timeout / drop / fallback" requirement.
+- **Alternatives considered:** A new explicit `dropReason` enum on
+  `ReliabilityEvent`. **Rejected** — the existing field already carries
+  this distinction unambiguously; a new field would duplicate information
+  already present, against this project's own economy-of-mechanism
+  convention.
+- **Impact:** `telemetry.cpp` only.
+
+### `DUPLICATE_SUPPRESSED` — a real, previously-unwired event
+- **Decision:** `onReliabilityEvent()`'s `DUPLICATE_DROPPED` case now
+  also emits a `DUPLICATE_SUPPRESSED` EVENT (previously: aggregate
+  `STATISTICS.duplicateCount` only, no discrete event).
+- **Reason:** The condition (`reliability_core::isDuplicateAndRecord()`
+  returning true) already existed and was already real; only the
+  telemetry wiring was missing.
+- **Impact:** `telemetry.cpp` only.
+
+### Live sink-side decode path (Part 17) — `apptraffic_core::decodeData()` gets its first real caller
+- **Decision:** `onReliabilityEvent()`'s `PACKET_RECEIVED` case now calls
+  `apptraffic_core::decodeData()` on the real received payload bytes. A
+  successful decode's `appSeq`/`potValue`/`ldrValue`/`timestampMs` flow
+  into the new `PACKET` telemetry message (`hasAppSeq`/`hasSensorValues`
+  gates — never fabricated on a decode failure or a non-DATA event).
+- **Reason:** `decodeData()` existed and was unit-tested since Phase 7 but
+  had zero live callers anywhere in `src/` — confirmed by grep in the
+  prior audit pass. This was explicitly called out as mandatory ("do not
+  merely test decodeData()") this pass.
+- **Alternatives considered:** Decoding inside `reliability.cpp` itself.
+  **Rejected** — `reliability_core`/`reliability.cpp` are deliberately
+  payload-agnostic by design (see `reliability_core.h`'s own file header);
+  `telemetry.cpp` is the layer that already translates every other
+  module's internal state into wire-facing meaning, so payload
+  interpretation for *reporting* purposes belongs there, not in the
+  transport-agnostic reliability layer.
+- **Impact:** `telemetry.cpp` gains a new dependency on
+  `apptraffic_core.h` (previously zero coupling between telemetry and
+  apptraffic). No `apptraffic_core`/`reliability_core` change.
+
+### New `0x0B PACKET` telemetry message
+- **Decision:** New `telemetry_core::PacketPayload`/`buildPacket()`,
+  driven entirely by the real `reliability::ReliabilityEvent` stream
+  (TX/RETRY/DELIVERED/DROP/RECEIVED -> SENT/RETRIED/DELIVERED/FAILED/
+  RECEIVED), never a parallel simulator. `path` is deliberately the
+  minimal real `[currentNode, neighbor]` pair for the ONE hop this
+  specific event concerns — not a full multi-hop reconstruction (that's
+  `ROUTE_UPDATE`'s job) — because the replacement GUI's own real
+  `ingestPacket()`/`drawFlow()` animate a moving dot along whatever `path`
+  array arrives, so a real sequence of per-hop events naturally builds up
+  the visual impression of a packet crossing the whole mesh, the same way
+  physically watching a radio hop at a time would look.
+- **Identity separation (Part 3's explicit requirement):** `meshSequence`
+  (`MeshPacket`'s own `(source,sequence)`), `appSeq` (apptraffic's own
+  counter, decoded from real payload bytes, present only when genuinely
+  decoded), the envelope's own `seq` (telemetry message counter), and the
+  new `appTimestampMs` (the originating node's own send-time `millis()`,
+  distinct from this message's own `envelope.timestampMs`) are four
+  separate, never-conflated axes — each documented explicitly in
+  `telemetry_core.h`'s `PacketPayload` comment.
+- **Reason:** Part 2/3/12 required real packet-movement telemetry the GUI
+  could animate; the replacement GUI's own manual documents exactly this
+  message shape (`src`/`dst`/`path`/`priority`/`seq`), and its real
+  `ingestPacket()` code already consumes it — confirmed by a real
+  harness run (`docs/testing.md`), not assumed.
+- **Alternatives considered:** (a) A full multi-hop `path` per PACKET
+  event (re-deriving the complete route via `routing_core::reconstructPath()`
+  every time). (b) Piggybacking packet-movement onto the existing `EVENT`
+  message type instead of a new one.
+- **Why alternatives were rejected:** (a) would duplicate `ROUTE_UPDATE`'s
+  own concept and cost more per-event computation for information the
+  animation doesn't need (it only needs the current hop's two endpoints).
+  (b) `EVENT`'s `details` shape varies per `eventType` already (by
+  design, see the existing `EventPayload` file header) — but packet
+  movement has enough of its own structured, always-present fields
+  (identity axes, path, status, attemptCount) that a dedicated message
+  type is more honest about its own shape than overloading `EVENT`.
+- **Impact:** `telemetry_core.h/.cpp` (new struct/builder, 3 new host
+  tests — 120/120 total, was 99/99), `telemetry.cpp` (`emitPacket()`
+  helper + 5 real call sites via `onReliabilityEvent()`).
+- **Real harness finding, fixed with explicit user authorization
+  (2026-08-18, same day):** the replacement GUI's own `applyTelemetryCore()`
+  had no `case 'PACKET':` in its message-type switch, so a real `PACKET`
+  message also logged a spurious "PARSE WARNING" even though the *same*
+  message was correctly animated via the outer `applyTelemetry()`
+  wrapper's independent check. Confirmed cosmetic-only by an actual
+  Node.js execution of the real GUI code (not the firmware's fault — see
+  `docs/testing.md`). Reported to the user with the exact one-line fix and
+  an explicit question ("want me to make that one edit... or route it
+  through whoever owns the GUI?"); the user replied "fix" — explicit,
+  in-session authorization for this one specific, minimal change,
+  distinct from and not implied by the earlier "full implementation mode"
+  instruction (which this project's standing `gui-main/` rule was
+  deliberately *not* treated as overriding on its own — see the "Multi-
+  node GUI without touching `gui-main/`" entry above). Added
+  `case'PACKET':break;` immediately before `default:` in
+  `mesh-command-console (1).html`'s `applyTelemetryCore()` — the single
+  smallest change that resolves it, matching the file's own existing
+  style exactly (single-quoted case labels, no added whitespace). Re-ran
+  the same harness against the now-modified file: 24/24, zero PARSE
+  WARNING lines for all 9 real messages. This is the only change made to
+  any file under `gui-main/` in this entire project's history — logged
+  here explicitly since it's a deliberate, narrow exception to a standing
+  rule, not a precedent for future unprompted `gui-main/` edits.
+- **Impact of the GUI fix:** one line added to
+  `gui-main/gui-main/mesh-command-console (1).html`. No firmware change.
+  `git diff --stat -- gui-main/` now shows this one real, authorized,
+  intentional change (plus the pre-existing, externally-made file
+  rename/replacement from earlier the same day) — not an accidental or
+  unprompted edit.
+
+### Real, measured (never extrapolated) prediction lead-time
+- **Decision:** `EVENT ROUTE_CHANGE.details.leadTimeMs` is now populated,
+  but only when `reason === LINK_DEGRADATION_R` (a genuine, real,
+  proactive score-driven reroute — never for `ROUTE_RECOVERY_R`/
+  `UNKNOWN_R`, which have no defensible "what deadline did we beat"
+  question to answer). Formula, computed entirely from real timestamps
+  and one real, existing configured constant:
+  ```
+  stalenessOfOldNextHopMs = now - routing::getNeighborLastSeenMs(oldNextHop)
+  leadTimeMs = max(0, ROUTING_ENTRY_TIMEOUT_MS - stalenessOfOldNextHopMs)
+  ```
+  In words: how much sooner this node's predictive, score-based reroute
+  acted, compared to what routing's own independent, silence-based hard
+  fallback (`ROUTING_ENTRY_TIMEOUT_MS`) would eventually have forced
+  anyway, using the real last-seen timestamp for the neighbor being moved
+  away from.
+- **Reason:** Part 13 explicitly required a defensible, real, measured
+  definition — "do not estimate a value just to make the dashboard look
+  impressive" — and explicitly offered a trend-extrapolation formula
+  (`T_failure_deadline` = where the current RSSI slope trend would cross
+  the failure threshold) as one acceptable shape, while also explicitly
+  allowing "return null/unavailable" if no defensible deadline exists.
+- **Alternatives considered:** (a) The literal trend-extrapolation formula
+  the task suggested (projecting the real least-squares RSSI slope
+  forward to estimate when `linkScore` would cross `T_LOW`). (b) Simply
+  measuring `T_actual_reroute - T_degradation_first_flagged` (elapsed
+  real time between two real events).
+- **Why alternatives were rejected:** (a) requires curve-fitting/
+  extrapolation assumptions (linear continuation of a noisy, EWMA-
+  smoothed slope) that are harder to defend as "never fabricated" under
+  scrutiny than a formula built entirely from two real timestamps and one
+  real existing constant — chosen as the *more* conservative, defensible
+  option the task's own fallback clause explicitly permitted ("if the
+  system cannot establish a defensible failure deadline... return
+  unavailable" — this project judged the extrapolated version to not
+  clear that bar confidently, and the timeout-comparison version to
+  clear it cleanly). (b) is a real, measurable quantity, but doesn't
+  answer "lead time" in the sense the task defined (time saved versus a
+  deadline) — it would just always be a small positive number bounded by
+  how fast `onRouteEvent()` fires after `onLinkEvent()`, not a meaningful
+  "how much earlier than failure" claim.
+- **Impact:** `telemetry.cpp::onRouteEvent()` only. No new `*_core`
+  function beyond `routing::getNeighborLastSeenMs()` (already added for
+  `NODE_SILENT` above, reused here). `docs/protocol.md`/
+  `docs/gui-compatibility-matrix.md` document the exact formula. Real
+  ESP32 compile confirms `leadTimeMs` genuinely varies with real neighbor
+  staleness — verified in the real GUI-parser harness (a real
+  `leadTimeMs:1850` round-tripped correctly into `state.lead` via the
+  GUI's own, unmodified `applyTelemetryCore()` EVENT case).
+
+### Multi-node GUI without touching `gui-main/`: `tools/multi-node-bridge.py`
+- **Decision:** New file, `tools/multi-node-bridge.py` (repo root, outside
+  `gui-main/` entirely) — opens N real serial ports (one per physical
+  board) and relays every line from every one of them, completely
+  unmodified, to every connected WebSocket client, so the GUI's own
+  existing "Connect via Bridge" feature sees all 5 nodes' real telemetry
+  over one connection.
+- **Reason:** The prior audit found the GUI's transport is single-source
+  (one serial port or one WebSocket at a time) but its *state model* is
+  already keyed by real `nodeId` and already supports arbitrarily many
+  distinct nodes (`state.firmware.nodes[nodeId]`, confirmed by reading
+  `applyTelemetryCore()` directly). The only missing piece was
+  aggregation, not GUI logic — so the fix belongs in a new transport
+  tool, not a GUI edit. Verified real: started the tool in `--mock`
+  mode, connected a real Python `websockets` client, and confirmed all 5
+  simulated `nodeId`s arrived over one WebSocket connection (see
+  `docs/testing.md`).
+- **Alternatives considered:** (a) Editing `gui-main/gui-main/mesh-command-console (1).html`
+  to support multiple simultaneous serial/WebSocket connections. (b)
+  Editing `gui-main/gui-main/serial-bridge.py` to accept multiple
+  `--source` arguments.
+- **Why alternatives were rejected:** Both (a) and (b) would edit files
+  under `gui-main/`, which CLAUDE.md's standing "Workflow rules" section
+  makes an absolute rule ("Do not edit anything under `gui-main/`...
+  that's a teammate's code... a conversation with the GUI owner, not a
+  firmware-side edit") — not overridden by this pass's own "full
+  implementation mode" framing, since the rule is explicitly durable
+  across sessions and the new tool achieves the same real capability
+  without touching either file. `serial-bridge.py`'s own structure was
+  read as a reference for the WebSocket-serving pattern (asyncio +
+  `websockets.serve`), never copied verbatim or imported.
+- **Impact:** One new file, `tools/multi-node-bridge.py`. Zero changes to
+  any file under `gui-main/` (`git diff --stat -- gui-main/` empty).
+  Real-tested this pass (mock mode + a real WebSocket client), not merely
+  reasoned about.
+
+### `docs/full-system-audit.md` updated to reflect all of the above
+- **Decision:** Marked the relevant Phase 19 checklist items (sections
+  G/K/L/N) as done, updated Phase 20's verdict and scorecard rows
+  affected by this pass.
+- **Impact:** Documentation only.
+- **Phase/date:** Full implementation pass, 2026-08-18.

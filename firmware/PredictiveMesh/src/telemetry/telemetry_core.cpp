@@ -288,6 +288,34 @@ size_t buildStatistics(const Envelope& env, const StatisticsPayload& p, char* bu
   return finish(w);
 }
 
+size_t buildPacket(const Envelope& env, const PacketPayload& p, char* buf, size_t bufSize) {
+  Writer w;
+  wInit(w, buf, bufSize);
+  wEnvelopeOpen(w, env, "PACKET");
+  wPrintf(w, "{\"meshSequence\":%u,\"seq\":%u,", static_cast<unsigned>(p.meshSequence), static_cast<unsigned>(p.meshSequence));
+  if (p.hasAppSeq) {
+    wPrintf(w, "\"appSeq\":%u,", static_cast<unsigned>(p.appSeq));
+  }
+  if (p.hasSensorValues) {
+    wPrintf(w, "\"potValue\":%u,\"ldrValue\":%u,\"appTimestampMs\":%lu,", static_cast<unsigned>(p.potValue),
+            static_cast<unsigned>(p.ldrValue), static_cast<unsigned long>(p.appTimestampMs));
+  }
+  wPrintf(w, "\"src\":\"%s\",\"dst\":\"%s\",\"currentNode\":\"%s\",", orEmpty(p.source), orEmpty(p.destination),
+          orEmpty(p.currentNode));
+  if (p.nextHop != nullptr) {
+    wPrintf(w, "\"nextHop\":\"%s\",", p.nextHop);
+  }
+  if (p.path != nullptr && p.pathLen > 0) {
+    wPrintf(w, "\"path\":");
+    wHopsArray(w, p.path, p.pathLen);
+    wPrintf(w, ",");
+  }
+  wPrintf(w, "\"trafficClass\":\"%s\",\"priority\":%s,\"status\":\"%s\",\"attemptCount\":%u}",
+          orEmpty(p.trafficClass), p.priority ? "true" : "false", orEmpty(p.status),
+          static_cast<unsigned>(p.attemptCount));
+  return finish(w);
+}
+
 size_t buildError(const Envelope& env, const ErrorPayload& p, char* buf, size_t bufSize) {
   Writer w;
   wInit(w, buf, bufSize);

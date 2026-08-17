@@ -74,18 +74,19 @@ AckResult onAckReceived(ReliabilityState& state, NodeId source, uint16_t sequenc
     if (p.active && idEquals(p.id, id)) {
       uint32_t latency = now - p.lastSendMs;
       NodeId nextHop = p.nextHop;
+      uint8_t attemptCount = p.attemptCount;
       p.active = false;
 
       state.stats.packetsDelivered++;
       state.stats.acknowledgements++;
       state.stats.lastLatencyMs = latency;
 
-      return AckResult{ true, nextHop, latency, i };
+      return AckResult{ true, nextHop, latency, i, attemptCount };
     }
   }
   // No matching pending entry — a stale, duplicate, or unknown ACK. Never
   // fabricate a match; state is left untouched (Part 3).
-  return AckResult{ false, NODE_ID_UNKNOWN, 0, INVALID_SLOT };
+  return AckResult{ false, NODE_ID_UNKNOWN, 0, INVALID_SLOT, 0 };
 }
 
 uint8_t tickTimeouts(ReliabilityState& state, uint32_t now, TimeoutEvent* out, uint8_t maxOut) {

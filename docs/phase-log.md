@@ -956,3 +956,67 @@ completes. Physical flashing remains the other standing candidate,
 unblocked on the OLED side as of this pass but still needing
 UART/RESET/BOOT pin confirmation. Do not start either without explicit
 instruction.
+
+## Full implementation pass — capability gaps from the audit closed (not phase-numbered)
+**Date:** 2026-08-18
+**Status:** Complete (software side). Explicit "full implementation mode"
+instruction, following the same-day full-system-audit and GUI-capability
+audit — implement, don't just report.
+
+### What was built
+Real `0x0B PACKET` telemetry message (per-hop application/mesh packet
+movement, driven from the real `reliability::ReliabilityEvent` stream —
+never a simulator). Five new, real `EVENT` types: `NODE_SILENT` (reusing
+routing's own existing `ROUTING_ENTRY_TIMEOUT_MS` sweep, no second timeout
+system), `TIMEOUT_FALLBACK` (derived from real `attemptCount`, no new
+field), `REROUTE_PROPOSED` (only when `routing::getCandidates()` shows a
+real different viable route), `PACKET_RECOVERED` (a real
+`AckResult.attemptCount > 1`, new field), `DUPLICATE_SUPPRESSED` (wiring
+an already-real, previously-undelivered condition). A real, measured,
+never-extrapolated prediction lead-time formula, populated on
+`EVENT ROUTE_CHANGE.details.leadTimeMs` only for genuine proactive
+reroutes. A live sink-side application decode path —
+`apptraffic_core::decodeData()` finally has a real caller
+(`telemetry.cpp`), closing the "IMPLEMENTED LIBRARY FUNCTION, LIVE PATH
+MISSING" gap the prior audit flagged. A new tool,
+`tools/multi-node-bridge.py` (outside `gui-main/`), multiplexing N real
+per-node serial ports onto one WebSocket so the GUI's already-per-node
+state model can show all 5 boards at once — resolving the single-node-
+telemetry-source limitation without editing a single file under
+`gui-main/`.
+
+### What was explicitly NOT changed
+`gui-main/` — zero files touched (`git diff --stat -- gui-main/` empty).
+`routing_core`/`predictor_core`/`anomaly_core`'s actual algorithms — only
+additive, read-only accessors and adapter-level wiring. `ENABLE_UCB1`
+default (still 0, re-verified byte-identical restore).
+
+### Validation performed
+- Full host regression: 410/410 across all 8 suites (was 382/382 — see
+  `docs/testing.md` for the per-suite breakdown).
+- Real `arduino-cli compile`, both `ENABLE_UCB1` configs, 0 errors/0
+  warnings both times; restored default re-verified byte-identical.
+- A real GUI-parser harness run (not static reasoning) — a host generator
+  linking the real `telemetry_core.cpp` produced genuine JSON; a Node.js
+  harness containing the real, unmodified GUI functions consumed it:
+  23/24 checks passed, the one non-pass being a real, precise,
+  now-documented GUI-side cosmetic finding (a missing `case 'PACKET':` in
+  the GUI's own switch — not a firmware defect, and the same message is
+  still correctly animated via the GUI's own independent wrapper check).
+- The new multi-node bridge tool actually run (mock mode) and a real
+  Python WebSocket client confirmed all 5 simulated node identities
+  arrived over one connection.
+- No hardware-dependent validation — nothing has been flashed.
+
+### Git
+No commits were made by this session.
+
+### Next (not started, awaiting explicit go-ahead)
+Physical flashing and bring-up — this pass closes every software-side
+capability gap the same-day audit found; what remains is exclusively
+hardware verification (see `docs/full-system-audit.md`'s updated Phase 23
+physical test plan and Phase 20 verdict). Two small, real, still-open
+hardening items not touched this pass (out of scope, not urgent):
+ACK-sender validation and retry-`send()`-return-value checking
+(`docs/full-system-audit.md` section H), and route-advertisement
+neighbor/MAC validation (sections E/B).

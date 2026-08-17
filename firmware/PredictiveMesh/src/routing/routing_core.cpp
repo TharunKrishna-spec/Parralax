@@ -111,6 +111,11 @@ bool applyRouteAdvertisement(RoutingState& state, NodeId from,
   return changed;
 }
 
+uint32_t neighborLastSeenMs(const RoutingState& state, NodeId neighbor) {
+  if (neighbor >= NODE_ID_COUNT) return 0;
+  return state.neighbors[neighbor].last_seen_ms;
+}
+
 uint8_t expireStale(RoutingState& state, uint32_t now, uint32_t timeoutMs) {
   uint8_t invalidated = 0;
 

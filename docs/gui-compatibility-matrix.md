@@ -1,5 +1,17 @@
 # Firmware <-> GUI Compatibility Matrix (Phase 6)
 
+> **Note (2026-08-18):** `gui-main/gui-main/mesh-command-console.html` (the
+> file this matrix was originally audited against) was replaced with
+> `mesh-command-console (1).html`. The field-by-field mappings below
+> remain accurate — the replacement GUI's core telemetry parser
+> (`applyTelemetryCore()`) is character-for-character identical to the
+> original `applyTelemetry()` this matrix cites — but it is no longer the
+> literal file on disk. See
+> [full-system-audit.md](full-system-audit.md)'s Phase 12 for the fresh
+> audit of what the replacement GUI adds on top (and one real gap: its own
+> manual documents a `PACKET` message type and several `EVENT` names
+> firmware doesn't implement).
+
 Audited against `gui-main/gui-main/docs/gui-telemetry-contract.md` ("Firmware
 <-> GUI Telemetry Contract v1", `FROZEN`, revision `1.0`) and against the
 real, unmodified GUI parser (`mesh-command-console.html`'s `applyTelemetry()`).
@@ -188,9 +200,69 @@ every node's real sensor data is sent and stored regardless.
 | `anomaly::SENSOR_FLATLINE` / `SENSOR_STALE` / `SENSOR_INVALID` | `SENSOR_FAILURE` (with `details.reason` distinguishing which) | real, coarsened — contract has one failure enum value for three distinct firmware conditions |
 | `anomaly::SENSOR_RECOVERED` | *(none)* | same reasoning as `LINK_RECOVERED` |
 | `reliability::PACKET_RETRY` | `PACKET_RETRY` | real (dormant until flashed to hardware — the code-level "no live `MSG_DATA` traffic" gap is resolved as of Phase 7's `src/apptraffic/`, see decisions.md; will fire on a real retried hop-transmission once running on real boards) |
-| `reliability::PACKET_DROP` | `PACKET_DROP` | real (same — dormant only until flashed, not blocked on any remaining code gap) |
-| `reliability::PACKET_TX/ACK/DELIVERED/RECEIVED/DUPLICATE_DROPPED` | *(none)* | not anomalies — already covered in aggregate by the periodic `STATISTICS` message, matching the contract's own EVENT-vs-STATISTICS division of concerns |
-| *(none in firmware)* | `NODE_JOIN` / `NODE_LEAVE` | **no firmware source exists** — routing tracks neighbor liveness but fires no discrete "first contact" / "now gone" event distinct from ordinary beacon traffic; not fabricated, flagged as a real gap |
+| `reliability::PACKET_DROP` | `PACKET_DROP` | real |
+| `reliability::PACKET_DROP` with real `attemptCount > 1` (retry-exhaustion, never the pool-full/sync-rejection cases, which always report 0/1) | `TIMEOUT_FALLBACK` (2026-08-18, new) | real — see the EVENT vocabulary table below |
+| `reliability::PACKET_DELIVERED` with real `attemptCount > 1` | `PACKET_RECOVERED` (2026-08-18, new) | real |
+| `reliability::DUPLICATE_DROPPED` | `DUPLICATE_SUPPRESSED` (2026-08-18, new) | real — previously fired no discrete EVENT at all (only the aggregate `STATISTICS.duplicateCount`); now also a real, per-occurrence EVENT |
+| `reliability::PACKET_TX/ACK/RECEIVED` | *(none)* | not anomalies — already covered in aggregate by the periodic `STATISTICS` message, matching the contract's own EVENT-vs-STATISTICS division of concerns. (`PACKET_TX`/`PACKET_RECEIVED`/etc. now also drive the new `0x0B PACKET` message below — a distinct, non-EVENT channel.) |
+| `routing::NEIGHBOR_SILENT` (2026-08-18, new — routing.cpp's own existing `ROUTING_ENTRY_TIMEOUT_MS` sweep, no second timeout system) | `NODE_SILENT` (2026-08-18, new) | real |
+| `predictor::LINK_DEGRADING`, only when `routing::getCandidates()` shows a real, different viable candidate not via the degrading neighbor | `REROUTE_PROPOSED` (2026-08-18, new) | real — never fired merely because a score changed; see decisions.md |
+| *(none in firmware)* | `NODE_JOIN` / `NODE_LEAVE` | **no firmware source exists** — routing tracks neighbor liveness but fires no discrete "first contact" event distinct from ordinary beacon traffic; not fabricated, flagged as a real gap |
+
+### EVENT vocabulary reconciliation (2026-08-18) — every value the replacement GUI's manual documents, cross-checked
+
+| Event | Trigger (real condition) | Firmware call site | Telemetry payload | GUI effect | Test |
+|---|---|---|---|---|---|
+| `LINK_DEGRADING` | `predictor_core` HEALTHY-but-below-T_HIGH | `telemetry.cpp::onLinkEvent()` | `{"score":F}` | decision HUD "PREDICTED DEGRADATION", mission phase -> PREDICT | host (predictor_core, telemetry_core) + real GUI-parser harness |
+| `LINK_FAILURE` | `predictor_core` HEALTHY->UNHEALTHY (score or staleness) | `telemetry.cpp::onLinkEvent()` | `{"score":F}` | logged; no dedicated HUD in the replacement GUI | host + harness |
+| `REROUTE_PROPOSED` | `LINK_DEGRADING` fires AND `routing::getCandidates()` shows a real different viable candidate | `telemetry.cpp::onLinkEvent()` | `{degradingNeighbor,alternateNextHop,alternateHopCount,alternateScore}` | logged (no dedicated HUD wired in the replacement GUI's code — only in its manual's vocabulary list; see decisions.md) | host (routing_core candidates) + real harness (this pass) |
+| `ROUTE_CHANGE` (this project's real name for the manual's `REROUTE_COMMITTED`) | a genuine health-driven or table-mutation route change | `telemetry.cpp::onRouteEvent()` | `{oldHops,newHops,reason,oldScore,newScore,leadTimeMs?}` | `setRoute()` -> topology animates the real hop array (any real path, not just `ABS`/`ACDS`) | host (route reason derivation) + real harness |
+| `NODE_SILENT` | a direct neighbor crosses `ROUTING_ENTRY_TIMEOUT_MS` with no packet heard | `routing.cpp::tick()` -> `telemetry.cpp::onRouteEvent()` | `{neighbor,silentForMs}` | logged; GUI's `NODE_SILENT`/`TIMEOUT_FALLBACK` HUD branch fires (`state.network='FALLBACK'`) | host (routing_core `neighborLastSeenMs`) + real harness |
+| `TIMEOUT_FALLBACK` | a hop-transmission's retries are genuinely exhausted (`reliability_core::tickTimeouts` FAILED, `attemptCount>1`) | `telemetry.cpp::onReliabilityEvent()` | `{sequence,neighbor,attemptCount}` | logged; same HUD branch as `NODE_SILENT` | host (reliability_core FAILED-branch tests) + real harness |
+| `PACKET_RECOVERED` | a delivery series' ACK matched with real `attemptCount>1` | `telemetry.cpp::onReliabilityEvent()` | `{sequence,neighbor,attemptCount}` | logged; GUI's `PACKET_RECOVERED` branch sets `state.network='RECOVERING'` | host (`AckResult.attemptCount`, new) + real harness |
+| `DUPLICATE_SUPPRESSED` | `reliability_core::isDuplicateAndRecord()` returns true | `telemetry.cpp::onReliabilityEvent()` | `{sequence,neighbor,attemptCount}` | logged | host (existing dup-filter tests) + real harness |
+| `PRIORITY_ROUTE` (this project's real name for the manual's `PRIORITY_OVERRIDE`) | a priority `ROUTE_SELECTED` | `telemetry.cpp::onRouteEvent()` | `{destination,nextHop,hopCount}` | GUI's `PRIORITY_OVERRIDE` branch (name-matched via a different string — see "not yet reconciled" below) | host + real harness |
+| `SENSOR_ANOMALY` (manual's `ANOMALY_SPIKE`) | real modified-Z spike | `telemetry.cpp::onAnomalyEvent()` | `{modifiedZ,threshold}` | GUI's `SENSOR_STATUS healthState==ANOMALY` decision HUD | host + real harness (Phase 3/6) |
+| `SENSOR_FAILURE` (manual's `ANOMALY_STUCK`) | real flatline/stale/invalid | `telemetry.cpp::onAnomalyEvent()` | `{reason,durationMs?}` | GUI's `SENSOR_STATUS healthState==FLATLINE` decision HUD | host + real harness |
+| `REROUTE_PROPOSED`/`RECOVERY` (manual names) vs. this project's `ROUTE_CHANGE`/`(none)` | — | — | — | **not reconciled by name** — the replacement GUI's own code checks `eventName==='PRIORITY_OVERRIDE'`/`==='RECOVERY'` in a few decision-HUD branches that this project's real `eventType` strings (`PRIORITY_ROUTE`, and no discrete recovery EVENT at all — see `LINK_RECOVERED`/`SENSOR_RECOVERED` above) don't literally match; those specific HUD popups stay dormant, not fabricated. A real, documented, non-blocking naming gap — see decisions.md |
+| `PACKET_SENT`/`PACKET_DELIVERED` (manual names, as EVENT types) | — | — | — | this project reports these as the new `0x0B PACKET` message's own `status` field instead (`SENT`/`DELIVERED`), not as separate EVENT eventTypes — a deliberate design choice (see decisions.md), not a gap |
+
+## `0x0B PACKET` (2026-08-18, new)
+
+Real per-hop application/mesh packet movement, generated only from
+`reliability::ReliabilityEvent` — never a parallel simulator. See
+`telemetry_core.h`'s `PacketPayload` file header for the full three-
+(really four-, once the decoded app-level timestamp is counted) identity-
+axis explanation (`meshSequence` vs `appSeq` vs the envelope's own `seq`
+vs `appTimestampMs`).
+
+| Field | Source | Status |
+|---|---|---|
+| `meshSequence` / `seq` | `ReliabilityEvent.sequence` (real `MeshPacket` identity) | real |
+| `appSeq` | `apptraffic_core::decodeData()`'s real decode of the received payload — present only on a real `PACKET_RECEIVED` at the real sink | real, live decode path (Phase 17 of the 2026-08-18 implementation pass — previously `decodeData()` existed and was unit-tested but had no live caller; now wired into `telemetry.cpp::onReliabilityEvent()`) |
+| `potValue`/`ldrValue`/`appTimestampMs` | same real decode | real, same gate as `appSeq` |
+| `src`/`dst` | `ReliabilityEvent.source`/`.destination` (`.destination` is new — reliability.cpp didn't carry this before this pass) | real |
+| `currentNode` | `thisNode().name` | real |
+| `nextHop` | `ReliabilityEvent.neighbor`, when meaningful | real |
+| `path` | the real `[currentNode, neighbor]` (or `[neighbor, currentNode]` for `RECEIVED`) pair for THIS hop — deliberately not a full multi-hop reconstruction (`ROUTE_UPDATE` already owns that); matches the GUI's own `ingestPacket()`/`normalizeHops()` expected shape, confirmed by a real harness run (2026-08-18) | real |
+| `trafficClass`/`priority` | `ReliabilityEvent.priority` (new — reliability.cpp didn't carry this before this pass) | real |
+| `status` | `SENT`/`RETRIED`/`DELIVERED`/`FAILED`/`RECEIVED`, mapped 1:1 from the real `ReliabilityEventType` | real |
+| `attemptCount` | `ReliabilityEvent.attemptCount`, including the real, final value `reliability_core::AckResult` now reports (new) | real |
+
+**RESOLVED, 2026-08-18 (with explicit user authorization to edit `gui-main/`
+for this one line):** the replacement GUI's own `applyTelemetryCore()`
+switch statement had no `case 'PACKET':`, so a real `PACKET` message also
+produced a spurious `"PARSE WARNING: unrecognized firmware message type"`
+log line — despite the same message being correctly consumed and animated
+by the outer `applyTelemetry()` wrapper's own independent
+`raw.type==='PACKET'` check into `ingestPacket()`. Confirmed cosmetic-only
+(not a functional defect) by a real Node.js harness run, then fixed with
+a single added case (`case'PACKET':break;`, added in
+`mesh-command-console (1).html` right before the `default:` branch) —
+the user explicitly authorized this one specific, minimal edit to
+`gui-main/`, an otherwise-standing off-limits rule (see `docs/decisions.md`).
+Re-ran the same harness against the fixed file: 24/24, zero PARSE WARNING
+lines for all 9 real messages fed. See `docs/testing.md`.
 
 ## `0x09 STATISTICS`
 

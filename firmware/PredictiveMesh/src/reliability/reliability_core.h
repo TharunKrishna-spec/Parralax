@@ -149,6 +149,7 @@ struct AckResult {
   NodeId nextHop;
   uint32_t latencyMs;
   uint8_t slot;  // which pending[] slot this concerns — meaningful only when matched; lets the adapter recover its own parallel packet-byte storage (e.g. the original packet's destination, for Phase 5's UCB1 reward) without re-deriving it (Part 2 of Phase 5's task spec)
+  uint8_t attemptCount;  // real, final attempt count this hop-transmission needed before the ACK matched (1 = succeeded on the first try, >1 = succeeded only after real retries) — captured from the pending slot before it's cleared, so telemetry can honestly distinguish a first-try delivery from a recovered one, matching the project's existing "one series, however many attempts" accounting (see Statistics's own field comments). Meaningless when matched == false.
 };
 AckResult onAckReceived(ReliabilityState& state, NodeId source, uint16_t sequence, uint32_t now);
 

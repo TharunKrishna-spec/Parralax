@@ -297,6 +297,94 @@ void test_statistics_fields() {
   check(balanced(buf), "STATISTICS line is structurally balanced");
 }
 
+// ---- 0x0B PACKET ----
+void test_packet_fields_full_with_app_seq_and_path() {
+  char buf[LINE_BUF_SIZE];
+  const char* path[] = { "A", "B", "S" };
+  PacketPayload p{};
+  p.meshSequence = 142;
+  p.hasAppSeq = true;
+  p.appSeq = 77;
+  p.hasSensorValues = true;
+  p.potValue = 2048;
+  p.ldrValue = 1500;
+  p.appTimestampMs = 99000;
+  p.source = "A";
+  p.destination = "S";
+  p.currentNode = "A";
+  p.nextHop = "B";
+  p.path = path;
+  p.pathLen = 3;
+  p.trafficClass = "NORMAL";
+  p.priority = false;
+  p.status = "SENT";
+  p.attemptCount = 1;
+
+  size_t n = buildPacket(testEnvelope(), p, buf, sizeof(buf));
+  check(n > 0, "buildPacket succeeds with a full, real payload");
+  check(contains(buf, "\"type\":\"PACKET\""), "PACKET carries the correct envelope type");
+  check(contains(buf, "\"meshSequence\":142"), "PACKET reports the real MeshPacket sequence identity, distinct from telemetry's own envelope seq");
+  check(contains(buf, "\"seq\":142"), "PACKET's payload-level seq alias matches meshSequence (matches the GUI's own ingestPacket() field read)");
+  check(contains(buf, "\"appSeq\":77"), "a real, successfully-decoded application sequence is reported when hasAppSeq is true — a third, distinct identity axis, never confused with meshSequence");
+  check(contains(buf, "\"potValue\":2048") && contains(buf, "\"ldrValue\":1500"), "real decoded sensor values are reported when hasSensorValues is true (Part 17: the sink's live decode path)");
+  check(contains(buf, "\"appTimestampMs\":99000"), "the originating node's real app-level timestamp is reported under its own distinct name, never conflated with the envelope's own timestampMs");
+  check(contains(buf, "\"src\":\"A\"") && contains(buf, "\"dst\":\"S\""), "PACKET reports real source/destination");
+  check(contains(buf, "\"currentNode\":\"A\"") && contains(buf, "\"nextHop\":\"B\""), "PACKET reports which node is reporting and its real next hop");
+  check(contains(buf, "\"path\":[\"A\",\"B\",\"S\"]"), "PACKET carries a real, reconstructed path — matches the GUI's ingestPacket()/normalizeHops() expected shape");
+  check(contains(buf, "\"status\":\"SENT\"") && contains(buf, "\"attemptCount\":1"), "PACKET reports real status/attemptCount, not fabricated");
+  check(balanced(buf), "PACKET (full) line is structurally balanced");
+}
+
+void test_packet_fields_minimal_no_app_seq_no_path_no_next_hop() {
+  char buf[LINE_BUF_SIZE];
+  PacketPayload p{};
+  p.meshSequence = 5;
+  p.hasAppSeq = false;
+  p.hasSensorValues = false;
+  p.source = "A";
+  p.destination = "S";
+  p.currentNode = "B";
+  p.nextHop = nullptr;
+  p.path = nullptr;
+  p.pathLen = 0;
+  p.trafficClass = "NORMAL";
+  p.priority = false;
+  p.status = "FAILED";
+  p.attemptCount = 4;
+
+  size_t n = buildPacket(testEnvelope(), p, buf, sizeof(buf));
+  check(n > 0, "buildPacket succeeds with a minimal payload (a relay hop that never decoded application bytes)");
+  check(!contains(buf, "\"appSeq\""), "appSeq is omitted entirely, never fabricated as 0 or null, when this hop never decoded real application bytes");
+  check(!contains(buf, "\"potValue\"") && !contains(buf, "\"ldrValue\"") && !contains(buf, "\"appTimestampMs\""),
+        "decoded sensor fields are omitted entirely (never a fabricated 0) when hasSensorValues is false");
+  check(!contains(buf, "\"nextHop\""), "nextHop is omitted when there genuinely is none (a final FAILED outcome), not written as null");
+  check(!contains(buf, "\"path\""), "path is omitted when it isn't available, never written as an empty/fabricated array");
+  check(contains(buf, "\"status\":\"FAILED\"") && contains(buf, "\"attemptCount\":4"), "a real exhausted-retry failure reports its real final attempt count");
+  check(balanced(buf), "PACKET (minimal) line is structurally balanced");
+}
+
+void test_packet_priority_traffic_class() {
+  char buf[LINE_BUF_SIZE];
+  PacketPayload p{};
+  p.meshSequence = 9;
+  p.hasAppSeq = false;
+  p.source = "A";
+  p.destination = "S";
+  p.currentNode = "A";
+  p.nextHop = "S";
+  p.path = nullptr;
+  p.pathLen = 0;
+  p.trafficClass = "PRIORITY";
+  p.priority = true;
+  p.status = "SENT";
+  p.attemptCount = 1;
+
+  size_t n = buildPacket(testEnvelope(), p, buf, sizeof(buf));
+  check(n > 0 && contains(buf, "\"trafficClass\":\"PRIORITY\"") && contains(buf, "\"priority\":true"),
+        "a real priority packet reports both the trafficClass string and the boolean priority flag, matching the GUI's ingestPacket() Boolean(p.priority||...) check");
+  check(balanced(buf), "PACKET (priority) line is structurally balanced");
+}
+
 // ---- 0x0A ERROR ----
 void test_error_fields() {
   char buf[LINE_BUF_SIZE];
@@ -384,6 +472,9 @@ int main() {
   test_sensor_status_optional_fields();
   test_event_details_passthrough();
   test_statistics_fields();
+  test_packet_fields_full_with_app_seq_and_path();
+  test_packet_fields_minimal_no_app_seq_no_path_no_next_hop();
+  test_packet_priority_traffic_class();
   test_error_fields();
   test_truncation_is_refused_not_partial();
   test_classify_link_all_branches();

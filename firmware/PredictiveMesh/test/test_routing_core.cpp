@@ -384,6 +384,23 @@ void test_reconstruct_path_missing_candidate_out_of_range() {
   check(n == 0, "a caller-supplied output buffer too small for the real path length is refused, never truncated silently");
 }
 
+// ---- 21. neighborLastSeenMs() reports the real, last-recorded timestamp ----
+void test_neighbor_last_seen_ms() {
+  RoutingState s;
+  init(s, NODE_A);
+
+  check(neighborLastSeenMs(s, NODE_B) == 0, "a never-observed neighbor reports 0 (honest 'no data', never fabricated)");
+
+  noteNeighborSeen(s, NODE_B, -50, 1000);
+  check(neighborLastSeenMs(s, NODE_B) == 1000, "reports the real timestamp of the most recent noteNeighborSeen() call");
+
+  noteNeighborSeen(s, NODE_B, -48, 1500);
+  check(neighborLastSeenMs(s, NODE_B) == 1500, "a fresh observation updates the reported timestamp");
+
+  check(neighborLastSeenMs(s, NODE_C) == 0, "a different, still-unobserved neighbor is unaffected and stays 0");
+  check(neighborLastSeenMs(s, static_cast<NodeId>(99)) == 0, "an out-of-range id is refused rather than read out of bounds");
+}
+
 }  // namespace
 
 int main() {
@@ -408,6 +425,7 @@ int main() {
   test_reconstruct_path_ambiguous_case_refuses_to_guess();
   test_reconstruct_path_loop_protection_never_revisits_self();
   test_reconstruct_path_missing_candidate_out_of_range();
+  test_neighbor_last_seen_ms();
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);
   return g_failures == 0 ? 0 : 1;

@@ -34,7 +34,27 @@
 #define PIN_BUZZER 25        // digital out — piezo buzzer signal. Never 34/35/36/39 (input-only, can't drive an output).
 #define PIN_OLED_SDA 21      // I2C SDA — default ESP32 pin. Nodes S and C only.
 #define PIN_OLED_SCL 22      // I2C SCL — default ESP32 pin. Nodes S and C only.
-#define OLED_I2C_ADDRESS 0x3C
+
+// Team-provided, hardware-specific I2C addresses (2026-08-18) — NOT the
+// same value for both displays. Previously a single shared
+// OLED_I2C_ADDRESS(0x3C) was used for both drivers, based on this
+// project's own bench-sketch audit (docs/hardware-readiness.md Part
+// 3/4/5) reasoning that 0x78 was the 0.96" sketch's own likely 8-bit/
+// 7-bit address bug. The team has since confirmed, against the actual
+// hardware, that the two real addresses genuinely differ per node - see
+// docs/decisions.md. Real, not invented.
+#define OLED_I2C_ADDRESS_S 0x3C  // Node S, 0.96" SSD1306
+// Node C, 1.3" SH1106. Unusual for a plain 7-bit I2C device address -
+// 0x78-0x7B is the I2C spec's reserved 10-bit-addressing prefix range,
+// so most Adafruit_SH110X modules answer at 0x3C/0x3D instead. Kept
+// exactly as team-provided rather than "corrected" back to 0x3C, since
+// this project's standing rule is to trust a direct, team-confirmed
+// hardware fact over a bench-sketch comment or a general convention. If
+// display.begin() ever fails on Node C, this is the first value to
+// re-check with a real I2C scanner - oled::init() already fails soft
+// (logs a warning, leaves the display dark) rather than hanging, so a
+// wrong value here does not block boot.
+#define OLED_I2C_ADDRESS_C 0x78
 
 // ============================================================
 // ROUTING (Phase 1)

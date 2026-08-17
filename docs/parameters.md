@@ -30,7 +30,8 @@ identically; only OLED presence differs by role (see
 | GPIO25 | `PIN_BUZZER` | Piezo buzzer digital out | Regular output-capable GPIO. Never use 34/35/36/39 — they can't drive an output. |
 | GPIO21 | `PIN_OLED_SDA` | OLED I2C data | Nodes S and C only. Default ESP32 I2C pin. |
 | GPIO22 | `PIN_OLED_SCL` | OLED I2C clock | Nodes S and C only. Default ESP32 I2C pin. |
-| — | `OLED_I2C_ADDRESS` | `0x3C` | SSD1306 128x64 default address. |
+| — | `OLED_I2C_ADDRESS_S` | `0x3C` | Node S's 0.96" SSD1306. |
+| — | `OLED_I2C_ADDRESS_C` | `0x78` | Node C's 1.3" SH1106 — team-confirmed real hardware value (2026-08-18), not the standard 7-bit `0x3C` most SH1106 modules answer at. See `docs/decisions.md`. |
 
 **Why ADC1, not ADC2:** the classic ESP32's ADC2 shares hardware with the
 WiFi radio. Once `WiFi.mode()`/ESP-NOW is active, `analogRead()` on an
@@ -206,13 +207,15 @@ Node S and Node C run genuinely different Adafruit drivers (a real,
 team-confirmed hardware fact, not a firmware choice) — see
 [decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot):
 
-| Node | Display | Controller | Library |
-|---|---|---|---|
-| S | 0.96" | SSD1306 | `Adafruit_SSD1306` |
-| C | 1.3" | SH1106 | `Adafruit_SH110X` (`Adafruit_SH1106G`) |
+| Node | Display | Controller | Library | I2C address |
+|---|---|---|---|---|
+| S | 0.96" | SSD1306 | `Adafruit_SSD1306` | `OLED_I2C_ADDRESS_S` = `0x3C` |
+| C | 1.3" | SH1106 | `Adafruit_SH110X` (`Adafruit_SH1106G`) | `OLED_I2C_ADDRESS_C` = `0x78` |
 
-Both use `OLED_I2C_ADDRESS` (`0x3C`, see "Hardware pins" above) and
-`PIN_OLED_SDA`/`PIN_OLED_SCL` (GPIO21/22).
+Both share `PIN_OLED_SDA`/`PIN_OLED_SCL` (GPIO21/22) but use **different**
+I2C addresses — a real, team-confirmed hardware fact (2026-08-18), not a
+single shared constant as originally implemented. See "Hardware pins"
+above and [decisions.md](decisions.md).
 
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 

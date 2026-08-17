@@ -39,9 +39,10 @@ struct AckWire {
 #pragma pack(pop)
 
 void fireEvent(reliability::ReliabilityEventType type, NodeId source, uint16_t sequence, NodeId neighbor,
-               uint8_t attemptCount, const uint8_t* payload = nullptr, uint8_t payloadLen = 0) {
+               NodeId destination, bool priority, uint8_t attemptCount, const uint8_t* payload = nullptr,
+               uint8_t payloadLen = 0) {
   if (g_eventCallback == nullptr) return;
-  reliability::ReliabilityEvent evt{ type, source, sequence, neighbor, attemptCount, payload, payloadLen };
+  reliability::ReliabilityEvent evt{ type, source, sequence, neighbor, destination, priority, attemptCount, payload, payloadLen };
   g_eventCallback(evt);
 }
 
@@ -79,7 +80,8 @@ bool transmitHop(MeshPacket& pkt, NodeId nextHop) {
     logger::warn("[RELIABILITY] pending pool full - dropping hop-transmission source=%s seq=%u, never sent",
                  nodeName(source), static_cast<unsigned>(pkt.sequence));
     reliability_core::recordImmediateFailure(g_state);
-    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, nextHop, 0);
+    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, nextHop,
+              static_cast<NodeId>(pkt.destination), pkt.priority != 0, 0);
     return false;
   }
 
@@ -94,7 +96,8 @@ bool transmitHop(MeshPacket& pkt, NodeId nextHop) {
                  "source=%s seq=%u",
                  nodeName(nextHop), nodeName(source), static_cast<unsigned>(pkt.sequence));
     reliability_core::cancelTx(g_state, slot);
-    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, nextHop, 1);
+    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, nextHop,
+              static_cast<NodeId>(pkt.destination), pkt.priority != 0, 1);
 #if ENABLE_UCB1
     // Part 2 (Phase 5): a real, final, per-series delivery failure —
     // exactly the granularity UCB1 rewards are defined at (never per
@@ -106,7 +109,8 @@ bool transmitHop(MeshPacket& pkt, NodeId nextHop) {
 
   logger::info("[RELIABILITY] TX source=%s seq=%u next=%s attempt=1", nodeName(source),
                static_cast<unsigned>(pkt.sequence), nodeName(nextHop));
-  fireEvent(reliability::ReliabilityEventType::PACKET_TX, source, pkt.sequence, nextHop, 1);
+  fireEvent(reliability::ReliabilityEventType::PACKET_TX, source, pkt.sequence, nextHop,
+            static_cast<NodeId>(pkt.destination), pkt.priority != 0, 1);
   return true;
 }
 
@@ -126,10 +130,15 @@ void handleAck(const MeshPacket& pkt) {
     return;
   }
 
-  logger::info("[RELIABILITY] ACK matched source=%s seq=%u neighbor=%s latency_ms=%u", nodeName(ackedSource),
-               static_cast<unsigned>(ackedSequence), nodeName(r.nextHop), static_cast<unsigned>(r.latencyMs));
-  fireEvent(reliability::ReliabilityEventType::PACKET_ACK, ackedSource, ackedSequence, r.nextHop, 0);
-  fireEvent(reliability::ReliabilityEventType::PACKET_DELIVERED, ackedSource, ackedSequence, r.nextHop, 0);
+  logger::info("[RELIABILITY] ACK matched source=%s seq=%u neighbor=%s latency_ms=%u attempt=%u", nodeName(ackedSource),
+               static_cast<unsigned>(ackedSequence), nodeName(r.nextHop), static_cast<unsigned>(r.latencyMs),
+               static_cast<unsigned>(r.attemptCount));
+  NodeId ackedDestination = static_cast<NodeId>(g_pendingPackets[r.slot].destination);
+  bool ackedPriority = g_pendingPackets[r.slot].priority != 0;
+  fireEvent(reliability::ReliabilityEventType::PACKET_ACK, ackedSource, ackedSequence, r.nextHop, ackedDestination,
+            ackedPriority, r.attemptCount);
+  fireEvent(reliability::ReliabilityEventType::PACKET_DELIVERED, ackedSource, ackedSequence, r.nextHop,
+            ackedDestination, ackedPriority, r.attemptCount);
 
   // Part 8: the real PDR observation source — per-attempt, per-hop, via
   // the predictor's own clean API. See docs/decisions.md.
@@ -160,15 +169,16 @@ void handleData(const MeshPacket& pkt, int8_t rssi) {
   if (duplicate) {
     logger::debug("[RELIABILITY] duplicate dropped source=%s seq=%u (already seen)", nodeName(source),
                   static_cast<unsigned>(pkt.sequence));
-    fireEvent(reliability::ReliabilityEventType::DUPLICATE_DROPPED, source, pkt.sequence, prevHop, 0);
+    fireEvent(reliability::ReliabilityEventType::DUPLICATE_DROPPED, source, pkt.sequence, prevHop,
+              static_cast<NodeId>(pkt.destination), pkt.priority != 0, 0);
     return;
   }
 
   if (pkt.destination == THIS_NODE_ID) {
     logger::info("[RELIABILITY] DATA delivered source=%s seq=%u len=%u", nodeName(source),
                  static_cast<unsigned>(pkt.sequence), static_cast<unsigned>(pkt.payload_len));
-    fireEvent(reliability::ReliabilityEventType::PACKET_RECEIVED, source, pkt.sequence, prevHop, 0, pkt.payload,
-              pkt.payload_len);
+    fireEvent(reliability::ReliabilityEventType::PACKET_RECEIVED, source, pkt.sequence, prevHop,
+              static_cast<NodeId>(pkt.destination), pkt.priority != 0, 0, pkt.payload, pkt.payload_len);
     return;
   }
 
@@ -183,7 +193,8 @@ void handleData(const MeshPacket& pkt, int8_t rssi) {
     logger::warn("[RELIABILITY] cannot forward source=%s seq=%u dest=%s - no safe next hop (routing=%s)",
                  nodeName(source), static_cast<unsigned>(pkt.sequence), nodeName(static_cast<NodeId>(pkt.destination)),
                  nextHop == NODE_ID_UNKNOWN ? "NONE" : nodeName(nextHop));
-    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, prevHop, 0);
+    fireEvent(reliability::ReliabilityEventType::PACKET_DROP, source, pkt.sequence, prevHop,
+              static_cast<NodeId>(pkt.destination), pkt.priority != 0, 0);
     return;
   }
 
@@ -224,7 +235,8 @@ void tick() {
                    nodeName(te.id.source), static_cast<unsigned>(te.id.sequence), nodeName(te.nextHop),
                    static_cast<unsigned>(te.attemptCount));
       transport::send(nodeInfo(te.nextHop).mac, reinterpret_cast<const uint8_t*>(&pkt), packetWireSize(pkt));
-      fireEvent(ReliabilityEventType::PACKET_RETRY, te.id.source, te.id.sequence, te.nextHop, te.attemptCount);
+      fireEvent(ReliabilityEventType::PACKET_RETRY, te.id.source, te.id.sequence, te.nextHop,
+                static_cast<NodeId>(pkt.destination), pkt.priority != 0, te.attemptCount);
       // Part 8/9: each individually-timed-out attempt is one failed PDR
       // observation, whether or not more retries remain — see
       // docs/decisions.md.
@@ -233,7 +245,9 @@ void tick() {
       logger::warn("[RELIABILITY] delivery FAILED after %u attempts - source=%s seq=%u next=%s",
                    static_cast<unsigned>(te.attemptCount), nodeName(te.id.source),
                    static_cast<unsigned>(te.id.sequence), nodeName(te.nextHop));
-      fireEvent(ReliabilityEventType::PACKET_DROP, te.id.source, te.id.sequence, te.nextHop, te.attemptCount);
+      fireEvent(ReliabilityEventType::PACKET_DROP, te.id.source, te.id.sequence, te.nextHop,
+                static_cast<NodeId>(g_pendingPackets[te.slot].destination), g_pendingPackets[te.slot].priority != 0,
+                te.attemptCount);
       predictor::onSendResult(te.nextHop, false);
 #if ENABLE_UCB1
       // Part 2 (Phase 5): retries exhausted — a real, final, per-series
