@@ -17,6 +17,7 @@
 namespace {
 
 uint32_t g_lastAliveLog = 0;
+uint32_t g_lastSensorSample = 0;
 
 // Transport already logs every [RX]/[TX] line itself (see
 // espnow_transport.cpp); this hook's job is to turn a raw received frame
@@ -65,6 +66,26 @@ void onLinkEvent(const predictor::LinkEvent& evt) {
   logger::debug("[PREDICTOR-EVENT] %s neighbor=%s score=%.2f", typeStr, nodeName(evt.neighbor), evt.score);
 }
 
+// Phase 3's sensor-health event stream (state-machine transitions only,
+// not every sample) - logged for now, same pattern as onRouteEvent/
+// onLinkEvent above. A later phase (OLED/telemetry) subscribes via
+// anomaly::setEventCallback() instead of adding a new hook here.
+//
+// Deliberately does NOT touch routing/predictor state - a sensor anomaly
+// and a network/link anomaly are separate failure domains (Part 9 of the
+// Phase 3 task spec). See docs/decisions.md.
+void onAnomalyEvent(const anomaly::AnomalyEvent& evt) {
+  const char* sensorStr = evt.sensor == anomaly::SensorId::POT ? "POT" : "LDR";
+  const char* typeStr =
+      evt.type == anomaly::AnomalyEventType::SENSOR_ANOMALY    ? "SENSOR_ANOMALY"
+      : evt.type == anomaly::AnomalyEventType::SENSOR_FLATLINE ? "SENSOR_FLATLINE"
+      : evt.type == anomaly::AnomalyEventType::SENSOR_STALE    ? "SENSOR_STALE"
+      : evt.type == anomaly::AnomalyEventType::SENSOR_INVALID  ? "SENSOR_INVALID"
+                                                                  : "SENSOR_RECOVERED";
+  logger::debug("[ANOMALY-EVENT] %s sensor=%s raw=%.0f modified_z=%.2f",
+                typeStr, sensorStr, evt.telemetry.raw_value, evt.telemetry.modified_z);
+}
+
 // Registers ESP-NOW peers for this node's direct topology neighbors (see
 // neighborsOf() in core/node_id.h), skipping any whose MAC hasn't been
 // filled in yet. Real MACs don't exist until hardware is flashed — see
@@ -91,7 +112,7 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 2 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 3 firmware");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
@@ -116,10 +137,11 @@ void setup() {
   predictor::init();
   predictor::setEventCallback(onLinkEvent);
   anomaly::init();
+  anomaly::setEventCallback(onAnomalyEvent);
   reliability::init();
   telemetry::init();
 
-  logger::info("Phase 2 firmware ready - entering main loop");
+  logger::info("Phase 3 firmware ready - entering main loop");
 }
 
 void loop() {
@@ -132,6 +154,13 @@ void loop() {
 
   routing::tick();
   predictor::tick();
+  anomaly::tick();
+
+  if (now - g_lastSensorSample >= SENSOR_SAMPLE_INTERVAL_MS) {
+    g_lastSensorSample = now;
+    anomaly::sample(anomaly::SensorId::POT);
+    anomaly::sample(anomaly::SensorId::LDR);
+  }
 
   delay(10);
 }

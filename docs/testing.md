@@ -4,6 +4,103 @@ No physical hardware exists yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 3 — sensor-health state machine, actually compiled and run (host g++) + real ESP32 compile
+
+### 1. Host tests (median/MAD calibration + modified Z-score + flatline + debounce/recovery + staleness)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/anomaly/anomaly_core.cpp ../src/routing/routing_core.cpp test_anomaly_core.cpp -o test_anomaly_core
+(clean compile, zero warnings)
+$ ./test_anomaly_core
+... (50 checks, see below)
+50/50 checks passed
+EXIT_CODE=0
+```
+
+(`routing_core.cpp` is linked in only for test 14's cross-module
+regression check — see below. `anomaly_core` itself has no dependency on
+`routing_core`.)
+
+14 test functions, one per required scenario, hand-verified against the
+actual formulas (see the comments in `test/test_anomaly_core.cpp` for the
+worked arithmetic — e.g. the exact variance/median/MAD numbers for the
+outlier-robustness case):
+
+| # | Required scenario | Test |
+|---|---|---|
+| 1 | Warmup with insufficient history | `test_warmup_insufficient_history` |
+| 2 | Stable normal signal | `test_stable_normal_signal` |
+| 3 | Single statistical outlier (debounced, no state flip) | `test_single_outlier_debounced` |
+| 4 | Repeated statistical anomalies (state transitions) | `test_repeated_anomalies_trigger_state` |
+| 5 | Flatline within tolerance | `test_flatline_within_tolerance` |
+| 6 | Flatline outside tolerance | `test_flatline_outside_tolerance_never_triggers` |
+| 7 | Recovery after anomaly | `test_recovery_after_anomaly` |
+| 8 | Recovery after flatline | `test_recovery_after_flatline` |
+| 9 | Invalid sample | `test_invalid_sample` |
+| 10 | Stale sensor | `test_stale_sensor` |
+| 11 | No false anomaly from normal noise | `test_no_false_anomaly_from_noise` |
+| 12 | MAD robustness against an isolated extreme value | `test_mad_robust_to_isolated_outlier` |
+| 13 | Multiple sensor IDs maintain independent state | `test_independent_sensor_state` |
+| 14 | Sensor anomaly does not automatically become a link anomaly | `test_sensor_anomaly_does_not_affect_routing` |
+
+Two real bugs were found and fixed while writing these tests (not
+predicted, actually hit by running them):
+- An off-by-one in the flatline tests: the first post-calibration sample
+  only establishes a baseline for the "unchanged since last sample" check
+  (there's nothing to compare it against yet), so reaching
+  `ANOMALY_STUCK_N` consecutive *unchanged deltas* requires
+  `ANOMALY_STUCK_N + 1` total samples, not `ANOMALY_STUCK_N` — the same
+  category of off-by-one already caught and fixed in Phase 2's predictor
+  tests.
+- `test_mad_robust_to_isolated_outlier`'s first attempt used an outlier
+  (raw value 5, ~1995 LSB from the calibrated median) extreme enough that
+  the *calibration step's own separate variance safety gate* rejected the
+  whole calibration attempt before median/MAD were ever computed — see
+  [decisions.md](decisions.md#calibrations-variance-safety-gate-deliberately-uses-ordinary-variance-not-mad)
+  for why that's the gate working correctly, not a bug in it. Fixed by
+  using a smaller-magnitude (150 LSB) outlier that passes the variance
+  gate while still clearly demonstrating median/MAD's robustness.
+
+Re-ran the full existing suite alongside this one to confirm nothing
+regressed: `test_routing_core` 21/21, `test_predictor_core` 31/31,
+`test_anomaly_core` 50/50 — **102/102 total, all three host suites,
+actually run.**
+
+**What this is not:** no real ADC, no simulated potentiometer/LDR — every
+input is a hand-constructed observation, every expected output worked by
+hand against the guide's own median/MAD/modified-Z/flatline formulas plus
+this phase's own debounce/recovery/staleness requirements.
+`anomaly.cpp` (the Arduino-facing adapter — real `analogRead()`, the
+blocking boot-calibration loop) is untested by this harness, same caveat
+as `routing.cpp`/`predictor.cpp` before it.
+
+### 2. Real ESP32 compilation (whole sketch, Phase 0 + 1 + 2 + 3)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all
+Sketch uses 902848 bytes (68%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 47056 bytes (14%) of dynamic memory, leaving 280624 bytes for local variables. Maximum is 327680 bytes.
+```
+
+Clean on the first attempt — 0 errors, 0 warnings. First real use of
+`analogRead()`/`analogReadResolution()`/`pinMode()` on the sensor pins in
+this project (Phase 0 deliberately deferred all sensor-reading code); no
+new API surprises this time.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (anomaly math, all 3 suites) | **verified** — 102/102, see above |
+| ESP32 COMPILATION (whole sketch) | **verified** — clean, 0 warnings, 0 errors, `esp32:esp32` core 3.3.11 |
+| PHYSICAL HARDWARE | **not yet verified** — no boards exist; see "Hardware-dependent tests" below |
+
+**GUI telemetry contract:** this phase's task spec asked for wire-format
+compatibility with an existing GUI teammate's telemetry contract. No such
+contract exists anywhere in this repository — see
+[decisions.md](decisions.md#gui-telemetry-contract-referenced-but-not-found-in-this-repository--flagged-not-fabricated)
+and [known-issues.md](known-issues.md) for the full explanation. This is
+not a validation gap in the usual sense (nothing was skipped) — it's a
+flagged, unresolved input this phase could not honestly claim to satisfy.
+
 ## Phase 2 — predictor math + routing integration, both layers actually run
 
 Two independent, real validation passes, per the Phase 2 task spec's

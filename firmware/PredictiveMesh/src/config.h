@@ -134,6 +134,104 @@
 #define PREDICTOR_STALENESS_TIMEOUT_MS 2000
 
 // ============================================================
+// ANOMALY (Phase 3)
+// ============================================================
+// Boot-time calibration sample count - implementation-guide.html §5.2 /
+// boot-sequence diagram: "Buffer ~100 raw ADC samples per sensor (boot
+// calibration window)".
+#define ANOMALY_CALIBRATION_SAMPLE_COUNT 100
+
+// MAD floor, in ADC LSB - guide: "~3 ADC LSB on a 12-bit ADC - real noise
+// floor". ESP32 analogRead() defaults to 12-bit (0-4095); see
+// anomaly::init()'s explicit analogReadResolution(12) call.
+#define ANOMALY_MAD_FLOOR 3.0f
+
+// Modified Z-score flag threshold - Iglewicz & Hoaglin's standard
+// recommendation, and the guide's own stated value ("|z| > 3.5").
+#define ANOMALY_MODIFIED_Z_THRESHOLD 3.5f
+
+// Flatline "unchanged" tolerance, in ADC LSB. The guide names EPS in its
+// pseudocode but gives no numeric value - a starting/placeholder figure,
+// chosen just above the expected ADC quantization noise floor so genuine
+// channel dither doesn't itself count as "changing" (which would mask a
+// truly stuck sensor), while a real slow analog change still registers.
+// Expected to be re-tuned once real hardware is available. See
+// docs/decisions.md.
+#define ANOMALY_FLATLINE_EPS 2.0f
+
+// Consecutive-unchanged-sample count before flagging STUCK - guide:
+// "STUCK_N ~ 50 samples".
+#define ANOMALY_STUCK_N 50
+
+// Upper bound on raw-sample variance (LSB^2) during boot calibration - the
+// guide's own boot-sequence diagram and Q&A describe a "variance within
+// safety envelope?" check that restarts calibration if unsafe, but gives
+// no numeric envelope. A stable resting analog input's variance is
+// dominated by ADC quantization/thermal noise (single-to-low-double-digit
+// LSB^2, well under this); a value in the hundreds or more likely means
+// active manipulation, a floating/disconnected pin, or interference during
+// what's supposed to be a stable baseline window. Starting/placeholder
+// figure, expected to be re-tuned once real hardware exists. See
+// docs/decisions.md.
+#define ANOMALY_MAX_CALIBRATION_VARIANCE 400.0f
+
+// Bounds the guide's "restart calibration" loop, which its own diagram
+// draws as an unconditional retry with no escape. An unbounded retry could
+// hang boot forever on hardware that's inherently noisy or has a floating/
+// unwired sensor pin - past this many failed attempts, calibration
+// proceeds anyway using the last (unsafe-but-only-available) sample set,
+// loudly logged rather than silently accepted. See docs/decisions.md.
+#define ANOMALY_CALIBRATION_MAX_RETRIES 10
+
+// How often each sensor is sampled and evaluated - matches
+// implementation-guide.html's stated main-loop cadence ("every evaluation
+// cycle (~100-200 ms)").
+#define SENSOR_SAMPLE_INTERVAL_MS 150
+
+// Sampling interval used only during the one-time boot calibration window,
+// deliberately faster than SENSOR_SAMPLE_INTERVAL_MS. At the steady-state
+// rate, buffering ANOMALY_CALIBRATION_SAMPLE_COUNT (100) samples per
+// sensor would add ~15 seconds of boot delay per sensor - a real cost for
+// a live hackathon demo reboot. 10ms keeps each sensor's calibration to
+// roughly 1 second while still taking genuinely time-spaced (not a single
+// instant burst) real samples. See docs/decisions.md.
+#define ANOMALY_CALIBRATION_SAMPLE_INTERVAL_MS 10
+
+// Consecutive over-threshold samples required before the sensor STATE
+// (not the raw per-sample modified-Z evidence, which is always computed
+// and reported instantly) actually transitions to ANOMALY. The guide's own
+// MAD-Z pseudocode has no such debounce - it's designed to flag a single
+// spike immediately - but this phase's task spec explicitly requires that
+// no state be classified as failed from one noisy sample. Kept small
+// (smaller than the predictor's 3-sample debounce) to stay close to the
+// guide's "catch it fast" intent for a genuine spike while still refusing
+// to act on a single sample. See docs/decisions.md.
+#define ANOMALY_CONSECUTIVE_COUNT 2
+
+// Consecutive under-threshold samples required to recover from ANOMALY
+// back to NORMAL. Symmetric with ANOMALY_CONSECUTIVE_COUNT for the same
+// "recovering shouldn't be easier to trigger than degrading was to detect"
+// reasoning already used for the predictor's hysteresis (Phase 2).
+#define ANOMALY_RECOVERY_COUNT 2
+
+// Consecutive non-flat samples required to exit FLATLINE back to NORMAL -
+// this phase's task spec explicitly requires that a flatlined sensor not
+// instantly report NORMAL from a single changed sample.
+#define ANOMALY_FLATLINE_RECOVERY_COUNT 2
+
+// Independent staleness timeout for a sensor observation stream - mirrors
+// the predictor's staleness fast-path (Phase 2) applied to sensors instead
+// of mesh neighbors. 3x the steady-state sample interval, matching the
+// project's established "tolerate a couple of missed samples before
+// declaring something down" convention (see ROUTING_ENTRY_TIMEOUT_MS).
+// In this phase's actual wiring (a locally, synchronously polled ADC) this
+// will rarely if ever fire - it exists because anomaly_core is designed to
+// be reusable for a sensor whose observations could genuinely stop
+// arriving (e.g. a future relayed/remote sensor), not because local ADC
+// polling is expected to go stale. See docs/decisions.md.
+#define ANOMALY_STALE_TIMEOUT_MS (3 * SENSOR_SAMPLE_INTERVAL_MS)
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

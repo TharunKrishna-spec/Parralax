@@ -231,3 +231,107 @@ layer (§5.4: hop-by-hop ACK, retransmit, duplicate filtering, and actual
 multi-hop `MSG_DATA` relaying — which is also the natural point to wire
 `predictor::onSendResult()` to real unicast delivery outcomes), and
 eventually the reporting/dashboard layer.
+
+---
+
+## Phase 3 — Sensor anomaly + sensor failure detection (MAD-Z + flatline + state machine)
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for Phase 4.
+
+### Objective
+Implement the sensor-health/anomaly layer per implementation-guide.html
+§5.2 and this phase's own task spec: distinguish a legitimate sensor
+value from a statistical anomaly, a stuck/flatlined sensor, and a
+stale/unavailable sensor, using two complementary detectors (MAD-Z,
+flatline) feeding one explicit sensor state machine, with debounce and
+recovery, local telemetry/events, and an explicit separation from
+network/link health. Explicitly excluded: routing modification based on
+sensor health, ACK/retry, duplicate filtering, UCB1, the final telemetry
+system, final demo orchestration, and any Phase 4 work.
+
+### What was built
+- `src/anomaly/anomaly_core.h/.cpp` — the real algorithm, Arduino-free
+  (mirrors `routing_core`/`predictor_core`'s split): a generic, timestamped
+  `SensorObservation` abstraction (not hardwired to the potentiometer/LDR);
+  boot-time median/MAD calibration with a variance safety envelope and
+  bounded (not infinite) retry; the modified-Z-score spike/jump detector;
+  an independent flatline/stuck detector; and a 6-state machine
+  (`WARMUP`/`NORMAL`/`ANOMALY`/`FLATLINE`/`STALE`/`INVALID`) with
+  debounced entry/recovery on both the anomaly and flatline paths.
+- `src/anomaly/anomaly.h/.cpp` — the Arduino-facing adapter: owns two
+  `SensorCore` instances (POT/`GPIO34`, LDR/`GPIO35`), performs the
+  blocking boot-calibration sequence for real, calls `analogRead()` every
+  `SENSOR_SAMPLE_INTERVAL_MS`, logs `[ANOMALY] sensor=... raw=... state=...
+  modified_z=... flatline_ms=...`, exposes `anomaly::getTelemetry()`, and
+  fires `SENSOR_ANOMALY`/`SENSOR_FLATLINE`/`SENSOR_RECOVERED`/
+  `SENSOR_STALE`/`SENSOR_INVALID` events via `anomaly::setEventCallback()`.
+- `src/config.h`: a full `ANOMALY_*`/`SENSOR_SAMPLE_INTERVAL_MS` constant
+  block (calibration count, MAD floor, Z threshold, flatline EPS, STUCK_N,
+  calibration variance envelope + retry bound, consecutive/recovery
+  debounce counts, staleness timeout) — see
+  [parameters.md](parameters.md) and [decisions.md](decisions.md) for
+  every value's derivation.
+- `firmware/PredictiveMesh/test/test_anomaly_core.cpp` (new) — 50/50
+  checks, covering all 14 required scenarios; two real bugs found and
+  fixed while writing it (an off-by-one in the flatline tests, and an
+  outlier magnitude that tripped the calibration's own variance gate
+  before reaching median/MAD) — see [testing.md](testing.md).
+- `main.cpp` updated: `anomaly::init()`/`setEventCallback()` wired in
+  `setup()`; `anomaly::tick()` added to `loop()`'s per-iteration calls;
+  sensor sampling added at `SENSOR_SAMPLE_INTERVAL_MS`.
+- Several real, documented design calls (not silently made): a single
+  discrete `SensorState` with FLATLINE taking priority over ANOMALY when
+  both would fire (rather than two independent booleans); a debounce
+  layered onto the guide's instant-flag MAD-Z design specifically for
+  state transitions, not raw evidence; the calibration safety gate
+  deliberately using ordinary variance (not MAD) for a genuinely different
+  question than the steady-state detector asks; and an explicit,
+  test-backed guarantee that sensor health never influences routing. See
+  `docs/decisions.md` for all of these in full.
+- **Flagged, not fabricated:** this phase's task spec referenced an
+  external "GUI telemetry contract" (specific message types, GUI panels)
+  that does not exist anywhere in this repository. Rather than invent one,
+  this is documented explicitly in
+  [known-issues.md](known-issues.md#gui-telemetry-contract--referenced-by-the-phase-3-task-spec-not-found-anywhere-in-this-repository)
+  as an open question for the user to resolve. The underlying telemetry
+  *data* Part 7 asked for is fully implemented and accessible locally
+  (`anomaly::getTelemetry()`), ready to be serialized into a real contract
+  once one is provided.
+
+### What was explicitly NOT built (by design)
+OLED wiring on Node C (would require a new external display library
+dependency, not yet added — deferred, same reasoning as Phase 0's original
+OLED deferral), any routing/predictor modification based on sensor health
+(explicitly forbidden this phase, and a real regression test proves the
+separation holds), a GUI wire-format implementation (no real contract
+exists to implement against — see above), ACK/retry, duplicate filtering,
+UCB1, the final telemetry system, final demo orchestration.
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_anomaly_core.cpp`: real, host-compiled
+  (g++ 15.2.0 / MinGW-W64), actually executed — 50/50 checks passed,
+  covering all 14 required scenarios.
+- Full existing suite re-run alongside it to confirm no regressions:
+  `test_routing_core` 21/21, `test_predictor_core` 31/31 — **102/102
+  total, all three host suites.**
+- **Real `arduino-cli compile` performed** against the full Phase 0+1+2+3
+  sketch, `esp32:esp32` core 3.3.11 — clean on the first attempt, 0
+  errors, 0 warnings (`--warnings all`). First real use of
+  `analogRead()`/`analogReadResolution()`/`pinMode()` in this project. See
+  [testing.md](testing.md).
+- No hardware-dependent validation — see
+  [known-issues.md](known-issues.md#phase-3-anomaly-engine--not-yet-run-on-hardware).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Per implementation-guide.html §06 (Hours 17-23, "required, not stretch"),
+the next phase would be the reliability layer: hop-by-hop ACK on every
+forwarded frame, bounded retransmit on a missing ACK, a sequence-number
+duplicate filter, and Packet Recovery Ratio logging (§07) — also the
+natural point to finally wire `predictor::onSendResult()` to a real
+unicast delivery signal (see Phase 2's PDR measurement-boundary decision).
+The GUI telemetry contract question above should be resolved before any
+phase claims wire-format compatibility with a GUI.

@@ -1,13 +1,15 @@
 # Protocol — `MeshPacket` wire frame
 
-Status: **unchanged since Phase 1; Phase 2 (predictor) added no wire
-changes.** `link_score` is a purely local quantity — each node's own
-evaluation of its own direct radio links, consumed only by that same
-node's own routing decision — so nothing about it needs to travel over the
-air. See
+Status: **unchanged since Phase 1; neither Phase 2 (predictor) nor Phase 3
+(anomaly) added any wire changes.** `link_score` is a purely local
+quantity — each node's own evaluation of its own direct radio links,
+consumed only by that same node's own routing decision. Anomaly flags are
+detected and logged locally, not yet transmitted anywhere. See
 [decisions.md](decisions.md#no-meshpacketwire-format-changes-needed-for-phase-2)
-for the full reasoning (and why this was a considered decision, not an
-oversight). Phase 0 defined this struct
+and
+[decisions.md](decisions.md#no-meshpacketwire-format-changes-for-anomaly-flags-in-phase-3)
+for the full reasoning (and why both were considered decisions, not
+oversights). Phase 0 defined this struct
 (`firmware/PredictiveMesh/src/core/packet.h`) and the ESP-NOW transport
 that carries it. Phase 1 is the first phase that actually constructs and
 parses one: `src/routing/routing.cpp` sends `MSG_HEARTBEAT` beacons

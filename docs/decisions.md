@@ -793,3 +793,436 @@ entries go at the bottom. Format:
 - **Impact:** None to the wire format. `docs/protocol.md` gets a short note
   confirming this was considered, not overlooked.
 - **Phase/date:** Phase 2, 2026-08-17.
+
+## `anomaly_core` split out as an Arduino-free pure module (third instance of the pattern)
+- **Decision:** The real median/MAD boot-calibration, modified-Z-score,
+  flatline, debounce, recovery, and staleness math lives in
+  `src/anomaly/anomaly_core.h`/`.cpp`, zero Arduino/ADC/Serial dependency.
+  `src/anomaly/anomaly.cpp` is the thin adapter: owns two
+  `anomaly_core::SensorCore` instances (POT, LDR), calls
+  `analogRead()`/`delay()`, and is the only half that touches `logger::*`.
+- **Reason:** Same reasoning as
+  [routing_core](decisions.md#routing_core-split-out-as-an-arduino-free-pure-module)
+  and
+  [predictor_core](decisions.md#predictor_core-split-out-as-an-arduino-free-pure-module-mirrors-routing_core)
+  before it — real algorithmic math (sort-based median, MAD, a boot-time
+  variance safety check, a 6-state debounced/recovering state machine)
+  worth verifying on its own. `anomaly_core.h` includes `../config.h`
+  directly for the same reason `predictor_core.h` does: every numeric
+  constant here (`ANOMALY_*`) is a real tuning parameter, not an
+  algorithm-intrinsic bound.
+- **Alternatives considered:** None beyond what was already rejected for
+  the same reasoning in the routing_core/predictor_core entries above.
+- **Why alternatives were rejected:** See those entries — the reasoning is
+  identical the third time.
+- **Impact:** Two new files (`anomaly_core.h/.cpp`), a new
+  `test/test_anomaly_core.cpp` (50/50 checks passing, covering all 14
+  scenarios required by this phase — see `docs/testing.md`), and
+  `config.h` gaining a full `ANOMALY_*`/`SENSOR_SAMPLE_INTERVAL_MS`
+  constant block.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Sensor abstraction is generic (`SensorObservation`), not hardwired to the potentiometer/LDR
+- **Decision:** `anomaly_core` never sees `PIN_SENSOR_POT`/`PIN_SENSOR_LDR`
+  or any ADC-specific concept. It accepts a generic
+  `SensorObservation{sensor_id, timestamp_ms, value, valid}` — `value` is
+  a plain `float`, `sensor_id` an opaque `uint8_t` the core never branches
+  on. `anomaly.cpp` (the adapter) is the only place that knows POT is
+  `sensor_id=0` at pin `GPIO34` and LDR is `sensor_id=1` at pin `GPIO35`.
+- **Reason:** This phase's task spec explicitly requires the anomaly
+  engine be reusable across sensors, not hardcoded to one physical
+  implementation, and requires the core to accept "sample value,
+  timestamp/time, configuration" generically. A generic observation struct
+  is also what makes `STALE` (time-since-last-observation) and `INVALID`
+  (a caller-flagged bad read) meaningful as first-class states — without
+  an explicit timestamp parameter (the Phase 3 first-draft design this
+  replaced didn't have one), staleness can't be computed at all.
+- **Alternatives considered:** Keep evaluating a raw `uint16_t rawAdcValue`
+  directly (this phase's own first-draft design, discarded before
+  finishing documentation - see git history/conversation for context),
+  with the POT/LDR distinction baked into a `SensorId` enum passed straight
+  into the core.
+- **Why alternatives were rejected:** Ties the pure algorithm module to a
+  specific enum/physical concept it shouldn't need to know about, and
+  provides no way to express staleness or validity - both explicitly
+  required states for this phase.
+- **Impact:** `anomaly.h`'s `SensorId` enum (POT/LDR) still exists, but
+  purely at the adapter layer, mapped to `sensor_id` integers when
+  constructing observations.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## One discrete `SensorState`, not two independent booleans — with a documented FLATLINE-over-ANOMALY priority
+- **Decision:** `anomaly_core::evaluate()` classifies each sensor into
+  exactly one of `{WARMUP, NORMAL, ANOMALY, FLATLINE, STALE, INVALID}` at
+  a time (Part 4's explicit state-machine requirement) — not two
+  independent booleans, which is what this phase's discarded first draft
+  used. When a sample is simultaneously far from the calibrated median
+  (would trigger the MAD-Z spike detector) **and** unchanged for
+  `ANOMALY_STUCK_N` consecutive samples (would trigger the flatline
+  detector), **FLATLINE wins** — a sensor that has stopped producing new
+  information at all is treated as the more fundamental failure than one
+  that is merely reading an unusual-but-still-live value.
+- **Reason:** implementation-guide.html §5.2's own diagram captions the two
+  detectors "reported independently — never merged," while this phase's
+  own task spec (Part 4) explicitly asks for a single discrete state
+  machine with a specific NORMAL → {ANOMALY, FLATLINE} branch shown as
+  mutually exclusive. These aren't actually in conflict once read
+  carefully: the guide's "never merged" describes the two *detectors'
+  math* never influencing each other's computation (true here — MAD-Z
+  never looks at flatline state and vice versa; both raw signals
+  (`modified_z`, flatline duration) are still independently exposed in
+  `SensorTelemetry`, Part 7) — it does not mandate that the top-level
+  reported *state* be a compound value. Given the task spec explicitly
+  wants one discrete state, a priority rule is needed for the rare case
+  both conditions hold at once, and FLATLINE is the more defensible
+  choice: a stuck sensor is a hardware/wiring failure mode, arguably more
+  urgent than "value looks unusual but the sensor is still live."
+- **Alternatives considered:** (a) ANOMALY takes priority over FLATLINE.
+  (b) Keep both as independent booleans instead of one discrete state, as
+  this phase's discarded first draft did.
+- **Why alternatives were rejected:** (a) is equally defensible in the
+  abstract, but FLATLINE was chosen as the more severe condition — no
+  strong reason favored (a) over this choice, so it's recorded as the
+  documented, if somewhat arbitrary, tie-break, the same category of
+  decision as routing_core's NodeId tie-break. (b) doesn't satisfy this
+  phase's explicit Part 4 requirement for a discrete state machine with
+  named states, and doesn't map cleanly onto Part 8's discrete event list
+  (`SENSOR_ANOMALY`/`SENSOR_FLATLINE`/...).
+- **Impact:** `anomaly_core::SensorState` is the reported classification;
+  `SensorTelemetry.modified_z` and `.flatline_active`/`.flatline_duration_ms`
+  remain independently populated regardless of which state won, so no
+  evidence is actually lost — only the single top-level label picks a
+  side.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Debounce/recovery persistence counts for ANOMALY; flatline's own `ANOMALY_STUCK_N` already provides entry persistence
+- **Decision:** The sensor STATE (not the raw per-sample `modified_z`
+  evidence, which is always computed and reported instantly) only
+  transitions NORMAL → ANOMALY after `ANOMALY_CONSECUTIVE_COUNT` (2)
+  consecutive over-threshold samples, and only recovers ANOMALY → NORMAL
+  after `ANOMALY_RECOVERY_COUNT` (2) consecutive under-threshold samples.
+  FLATLINE's *entry* needs no separate debounce (`ANOMALY_STUCK_N`, 50, is
+  already a sustained-evidence requirement by construction), but its
+  *exit* does: `ANOMALY_FLATLINE_RECOVERY_COUNT` (2) consecutive non-flat
+  samples are required before FLATLINE → NORMAL, so one changed sample
+  alone can't instantly clear it (this phase's Part 6 explicitly requires
+  this).
+- **Reason:** implementation-guide.html §5.2's own MAD-Z pseudocode has no
+  debounce at all — a single spike is meant to flag instantly, which is
+  the detector's whole point. This phase's task spec (Part 5) explicitly
+  requires that no sensor be classified as failed from one noisy sample,
+  overriding the guide's instant-flag design specifically for the
+  *discrete state transition* (not the raw evidence, which stays instant
+  and is still exposed via `SensorTelemetry.modified_z` on every sample).
+  `ANOMALY_CONSECUTIVE_COUNT` is kept smaller than the predictor's 3-sample
+  debounce (Phase 2) to stay closer to the guide's "catch it fast" intent
+  while still refusing to act on a single sample.
+- **Alternatives considered:** (a) No debounce at all for ANOMALY,
+  honoring the guide's literal instant-flag design. (b) A larger debounce
+  count (e.g. matching the predictor's 3).
+- **Why alternatives were rejected:** (a) directly contradicts this
+  phase's explicit Part 5 instruction. (b) No strong reason favored a
+  larger count; 2 is the smallest value that meaningfully distinguishes
+  "one noisy sample" (test scenario 3,
+  `test_single_outlier_debounced`) from "sustained anomaly" (test scenario
+  4), matching "choose the smallest defensible persistence mechanism."
+- **Impact:** `ANOMALY_CONSECUTIVE_COUNT`, `ANOMALY_RECOVERY_COUNT`,
+  `ANOMALY_FLATLINE_RECOVERY_COUNT` in `config.h`. Test scenarios 3, 4, 7,
+  8 in `test/test_anomaly_core.cpp` exercise exactly this logic.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Boot calibration retry is bounded, not infinite
+- **Decision:** `anomaly_core`'s boot-calibration retry (on failing the
+  variance safety envelope) is bounded at `ANOMALY_CALIBRATION_MAX_RETRIES`
+  (10) attempts, tracked internally as `SensorCore::warmupRetryCount` — not
+  infinite, as implementation-guide.html's own boot-sequence diagram
+  literally draws the "restart calibration" loop-back. Past that many
+  attempts, `evaluate()` force-accepts the next full buffer regardless of
+  variance (bypassing the safety gate, via the internal
+  `tryFinalizeCalibration(core, forceAccept=true)` path), using real (if
+  statistically unsafe) samples, loudly logged at ERROR by the adapter.
+  `anomaly.cpp`'s `calibrateSensor()` needs no retry-counting logic of its
+  own — it simply keeps feeding real samples through `evaluate()` while
+  `core.state == WARMUP`, and the bounded-retry/force-accept decision is
+  made entirely inside `anomaly_core`.
+- **Reason:** Real hardware could plausibly have a genuinely noisy or
+  unwired sensor pin (especially before hardware exists at all, or during
+  early bring-up), and an unbounded retry would mean the whole node —
+  including its already-initialized ESP-NOW/routing participation — never
+  reaches its main loop. A firmware that fails loudly but keeps running is
+  more useful for debugging and for the rest of the mesh (which still
+  needs this node routing/relaying) than one that silently hangs forever
+  waiting for a sensor reading that may never stabilize.
+- **Alternatives considered:** (a) Implement the diagram literally with an
+  unconditional retry loop. (b) Skip the variance check entirely and
+  always accept the first calibration attempt.
+- **Why alternatives were rejected:** (a) is a real boot-reliability risk
+  for a device that needs to come up cleanly during a live demo. (b)
+  discards a real, guide-specified safety check for no benefit.
+- **Impact:** `ANOMALY_CALIBRATION_MAX_RETRIES` in `config.h`. Test
+  scenario `test_force_accept_bypasses_variance_gate`-equivalent coverage:
+  see `test_mad_robust_to_isolated_outlier` and the calibration-path tests
+  in `test/test_anomaly_core.cpp` for the underlying `tryFinalizeCalibration`
+  behavior; the adapter's bounded-loop-then-force-accept control flow
+  itself is in `anomaly.cpp` (Arduino-coupled, reviewed by hand per the
+  same convention as `routing.cpp`/`predictor.cpp`).
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Calibration's variance safety gate deliberately uses ordinary variance, not MAD
+- **Decision:** The boot-calibration "variance within safety envelope?"
+  check (implementation-guide.html's own boot-sequence diagram) computes
+  plain statistical variance (mean/sum-of-squared-deviations) over the raw
+  calibration buffer — the same statistic this phase's task spec (Part 2)
+  otherwise explicitly says not to substitute for MAD in the anomaly
+  detector itself.
+- **Reason:** These are two different questions asked at two different
+  points in the pipeline. The MAD-Z *detector* (steady-state, once
+  calibrated) must be robust to a single outlier *within* its evidence
+  window — that's the whole reason MAD/median exist, and ordinary
+  mean/stddev would be exactly the wrong tool there. The calibration
+  *safety gate* asks a different question: "was this 100-sample window, as
+  a whole, a trustworthy resting baseline, or was something actively
+  disturbing the sensor during calibration?" — and the guide's own
+  diagram/Q&A literally names this check "variance," not MAD. Using
+  ordinary variance here is a deliberate, correct match to a real
+  difference in what's being measured, not an inconsistency. A concrete
+  consequence, surfaced by writing `test_mad_robust_to_isolated_outlier`:
+  a calibration buffer containing one *sufficiently extreme* isolated
+  outlier will be rejected by this variance gate before median/MAD are
+  even computed — which is the gate doing its job (catching a genuinely
+  disturbed calibration window), not a bug. The test uses a smaller-
+  magnitude (but still clearly demonstrative) outlier specifically chosen
+  to pass the variance gate while still showing median/MAD's robustness
+  compared to what a naive mean/stddev would have done.
+- **Alternatives considered:** Use MAD (instead of variance) for the
+  calibration safety check too, for consistency with the steady-state
+  detector.
+- **Why alternatives were rejected:** Would contradict the guide's own
+  literal wording ("variance within safety envelope") for no real benefit
+  — MAD's outlier-robustness is exactly the wrong property to want here;
+  the calibration gate's job is to be *sensitive* to the buffer being
+  disturbed, not robust to it.
+- **Impact:** `ANOMALY_MAX_CALIBRATION_VARIANCE` in `config.h`, documented
+  as governing ordinary variance specifically. `docs/testing.md` documents
+  the outlier-magnitude choice in `test_mad_robust_to_isolated_outlier`.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Sensor health and network/link health are separate failure domains — no coupling added
+- **Decision:** `anomaly_core`/`anomaly.cpp` have zero references to
+  `routing_core`/`routing.cpp`/`predictor_core`/`predictor.cpp`, and vice
+  versa. A sensor entering `ANOMALY`/`FLATLINE`/`STALE` has no effect
+  whatsoever on any routing decision.
+- **Reason:** This phase's task spec (Part 9) explicitly requires this
+  separation and explicitly forbids modifying routing behavior based on
+  sensor health "unless explicitly required by the implementation guide"
+  — and nothing in implementation-guide.html §5.2/§5.3 ties sensor anomaly
+  detection to route selection; they're presented as entirely independent
+  pieces of the architecture (§01's layer stack lists Anomaly and Routing
+  as separate boxes with no edge between them). Conflating "this node's
+  potentiometer looks weird" with "this node's mesh link is degrading"
+  would be a real correctness bug, not just an architectural tidiness
+  concern — a stuck potentiometer says nothing about RF conditions.
+- **Alternatives considered:** Have a sensor `ANOMALY`/`FLATLINE`
+  transition mark this node's outgoing link quality as suspect, on the
+  theory that a node having *any* kind of problem is worth flagging to
+  routing.
+- **Why alternatives were rejected:** Explicitly forbidden by Part 9, and
+  would be a real design mistake independent of that instruction — sensor
+  and RF/link health are governed by completely different physical
+  phenomena with no causal relationship.
+- **Impact:** `test_sensor_anomaly_does_not_affect_routing` in
+  `test/test_anomaly_core.cpp` is a real regression test proving this:
+  driving a `SensorCore` into `ANOMALY` and re-querying
+  `routing_core::selectNextHop()` on an unrelated `RoutingState` produces
+  a byte-identical result before and after.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## GUI telemetry contract referenced but not found in this repository — flagged, not fabricated
+- **Decision:** This phase's task spec asked for `SENSOR_STATUS`/`EVENT`
+  payloads to "match the documented GUI telemetry contract exactly,"
+  describing a GUI teammate who has "already implemented support for
+  HELLO, HEARTBEAT, NODE_STATUS, LINK_UPDATE, ROUTE_UPDATE, PREDICTION,
+  SENSOR_STATUS, EVENT, STATISTICS, ERROR." A repository search (for
+  `gui-telemetry-contract.md`, any `*gui*`/`*telemetry*` file, and those
+  message-type names anywhere in `docs/`, `PERSONAL_DOCS/`, or the
+  firmware source) found **no such contract, file, or message-type list
+  anywhere in this repository** — none of those names match this
+  project's actual `MessageType` enum (`MSG_HEARTBEAT`, `MSG_DATA`,
+  `MSG_ACK`, unchanged since Phase 0) or anything in
+  implementation-guide.html, which frames the "Reporting Layer" as
+  OLED + Serial/WebSerial, not a separate GUI application with its own
+  wire protocol. Rather than invent a `docs/gui-telemetry-contract.md` or
+  a message-type list to "match," this phase implements the underlying
+  *data* Part 7 asks for (a complete `SensorTelemetry` snapshot: raw
+  value, median, MAD, modified-Z, threshold, flatline state/duration,
+  sensor state, validity) as a clean, local accessor
+  (`anomaly::getTelemetry()`) and a real event stream
+  (`anomaly::setEventCallback()`), ready to be serialized into whatever
+  format a real contract turns out to specify, once one is actually
+  provided.
+- **Reason:** This project's standing rule, restated in nearly every prior
+  phase, is "no fake data, no invented protocols, document rather than
+  silently redesign." Fabricating a wire-format/message-type list with no
+  basis in this repository would be exactly that kind of invention, dressed
+  up as "matching an existing contract" — the opposite of what actually
+  matching a contract would mean. This is flagged directly rather than
+  silently worked around, per the task spec's own fallback instruction
+  ("If the contract needs modification: document the change... and the
+  reason") — there is no existing contract to modify; one needs to be
+  supplied.
+- **Alternatives considered:** (a) Invent a plausible-looking
+  `docs/gui-telemetry-contract.md` describing the listed message types, so
+  the firmware would have something concrete to "match." (b) Silently
+  ignore Part 7/8's GUI-specific framing and just build local logging, without
+  flagging the mismatch at all.
+- **Why alternatives were rejected:** (a) would fabricate provenance for a
+  document that doesn't exist and could actively mislead a real GUI
+  integration effort later (code review/onboarding would reasonably assume
+  a file named `gui-telemetry-contract.md` reflects a real, agreed
+  contract). (b) leaves a real, potentially blocking gap
+  undocumented — the opposite of this project's "document, don't silently
+  drop" principle, applied consistently in every other phase's scope
+  decisions (see the OLED-deferral and PDR-measurement-boundary entries).
+- **Impact:** `docs/known-issues.md` tracks this explicitly as an open
+  question for the user to resolve (share the real contract, or confirm
+  none exists yet) before any firmware claims wire-format compatibility
+  with a GUI. No fabricated file was created.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Calibration uses a separate, faster sample interval than steady-state evaluation
+- **Decision:** `ANOMALY_CALIBRATION_SAMPLE_INTERVAL_MS` (10ms) is a
+  distinct, faster constant from `SENSOR_SAMPLE_INTERVAL_MS` (150ms, the
+  steady-state main-loop cadence). At 150ms, buffering
+  `ANOMALY_CALIBRATION_SAMPLE_COUNT` (100) samples per sensor would cost
+  ~15 seconds of boot delay per sensor (~30s for both, worse under
+  retries); at 10ms it costs roughly 1 second per sensor.
+- **Reason:** Nothing in implementation-guide.html specifies the
+  calibration sampling rate distinctly from the steady-state rate — this
+  is the same "guide names the concept, not the number" situation as
+  Phase 2's `PREDICTOR_SLOPE_WINDOW`/staleness-timeout choices. A ~30-second
+  (or longer, under retries) boot hang on every single reboot is a real
+  cost for a live hackathon demo, and the calibration window's *purpose*
+  (capturing a real resting-noise baseline) doesn't obviously require
+  100-200ms spacing the way the predictor's slope estimation does — even
+  10ms apart, 100 real ADC reads still see real quantization/thermal noise
+  variation, just compressed in time.
+- **Alternatives considered:** Reuse `SENSOR_SAMPLE_INTERVAL_MS` for both
+  calibration and steady-state sampling (one constant, simpler).
+- **Why alternatives were rejected:** Would reintroduce the ~15-30 second
+  boot delay for no documented benefit — the calibration window's
+  real requirement is "spread out, not simultaneous" samples, which 10ms
+  spacing already satisfies.
+- **Impact:** Two `SENSOR_*`/`ANOMALY_*` timing constants in `config.h`
+  instead of one — an intentional, documented case of *not* sharing a
+  timer, the same category of decision as Phase 2's independent staleness
+  fast-path (deliberately decoupled where the two things being timed have
+  different real requirements).
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## Anomaly detection scope: no OLED/telemetry wiring in Phase 3
+- **Decision:** Phase 3 implements real sensor anomaly detection (boot
+  calibration, MAD Z-score, flatline detector) and real Serial logging
+  (`[ANOMALY]`/`[ANOMALY-EVENT]` lines, an `anomaly::setEventCallback()`
+  hook), but does **not** add an OLED driver library or wire flags to
+  Node C's display. `src/telemetry/` remains an untouched stub.
+- **Reason:** implementation-guide.html §06's roadmap bundles "Wire both
+  flags to the OLED on Node C" into the same Hours 12-17 bucket as the
+  anomaly algorithm itself — but this codebase's own established structure
+  (unchanged since Phase 0's own decision to defer OLED) treats Anomaly
+  and Reporting as two separate layers in `docs/architecture.md`'s layer
+  stack, developed as separate phases (matching how Phase 1 was
+  "routing only," not "routing plus telemetry," and Phase 2 was
+  "predictor only"). More concretely: wiring a real OLED requires adding
+  an external Arduino library (Adafruit_SSD1306/GFX or U8g2) that doesn't
+  exist in this project yet — installing a new dependency is exactly the
+  kind of consequential, hard-to-reverse action this project's standing
+  guidance says to flag/ask about rather than decide silently, unlike
+  `analogRead()` (a built-in Arduino core function, no new dependency,
+  already fully documented as this phase's real hardware target since
+  Phase 0's `docs/parameters.md`). The guide's own Hours 12-17 sync
+  checkpoint ("twisting the pot on Node C shows SPIKE/JUMP; holding it
+  still shows STUCK") is still honestly demonstrable through this phase's
+  real `[ANOMALY]` Serial log lines, the same verification channel every
+  prior phase has used.
+- **Alternatives considered:** (a) Add the OLED library now and wire it up
+  to fully match the guide's Hours 12-17 bucket. (b) Silently skip
+  mentioning the OLED gap at all.
+- **Why alternatives were rejected:** (a) is a real, consequential new
+  dependency decision that should be confirmed rather than assumed,
+  especially given Phase 0 explicitly punted on exactly this question with
+  the same reasoning ("Revisit when the reporting layer's phase starts" —
+  see
+  [decisions.md](decisions.md#no-oledsensor-library-dependency-introduced-yet)).
+  (b) would leave a real guide/roadmap-vs-codebase-structure mismatch
+  undocumented, contradicting the project's standing "document, don't
+  silently redesign or silently drop" principle.
+- **Impact:** `docs/known-issues.md` tracks OLED wiring as explicitly
+  deferred, not forgotten. Revisit when a future phase takes on the
+  reporting/dashboard layer.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## No `MeshPacket`/wire format changes for anomaly flags in Phase 3
+- **Decision:** Anomaly flags are not added to any packet payload in
+  Phase 3. `core/packet.h`/`docs/protocol.md` are unchanged.
+- **Reason:** Same shape as
+  [Phase 2's equivalent decision](decisions.md#no-meshpacketwire-format-changes-needed-for-phase-2) —
+  nothing in this phase's real scope (local sensor anomaly detection,
+  logged locally) requires transmitting a flag over the mesh yet. Sending
+  an anomaly flag as part of a real `MSG_DATA` packet (per
+  `message_types.h`'s own comment, `"application payload (sensor reading,
+  anomaly flag, ...)"`) requires the reliability layer's real hop-by-hop
+  relay to actually be useful beyond a single hop — still a later phase's
+  scope (§5.4), unbuilt as of Phase 3.
+- **Alternatives considered:** Add an anomaly-flag field to `MeshPacket`
+  or a new payload sub-format now, in anticipation of the reliability
+  layer needing it.
+- **Why alternatives were rejected:** Speculative protocol growth ahead of
+  the layer that actually needs it — the same "don't add fields because
+  they may be useful" principle Phase 0 established for `MeshPacket` and
+  Phase 1 re-applied to the TTL/hop-count question.
+- **Impact:** None to the wire format.
+- **Phase/date:** Phase 3, 2026-08-17.
+
+## GUI integration audit performed before Phase 4 — no firmware changes made
+- **Decision:** With the real GUI implementation now present in the repo
+  (`gui-main/gui-main/`, including its own authored
+  `docs/gui-telemetry-contract.md`), a read-only audit compared the GUI's
+  actual parser/contract against current firmware, producing a full
+  compatibility matrix (GUI-expects / firmware-provides / status) across
+  all 10 contract message types. No firmware architecture, enums, structs,
+  or serialization code were changed as part of this audit, and
+  `docs/gui-telemetry-contract.md` was **not** created at the repo root —
+  the existing file already inside `gui-main/gui-main/docs/` is the real
+  one; duplicating or paraphrasing it into a second location risked the
+  two drifting out of sync.
+- **Reason:** The task explicitly required inspecting the GUI's real
+  source as the authoritative reference (not assuming the contract
+  referenced in the Phase 3 spec still matched, and not fabricating a
+  canonical contract file until a real comparison justified one), and
+  explicitly forbade starting Phase 4 or modifying firmware architecture
+  during the audit.
+- **Alternatives considered:** (a) Immediately update firmware
+  enums/structs (e.g. `predictor_core::LinkHealth`,
+  `anomaly_core::SensorState`) to match the GUI's richer vocabulary
+  (`linkState`'s 6 values, `sensorHealth`'s 6 values) while doing the
+  audit. (b) Copy `gui-main/gui-main/docs/gui-telemetry-contract.md` to
+  `docs/gui-telemetry-contract.md` so firmware docs had a local copy.
+- **Why alternatives were rejected:** (a) is exactly the "no firmware
+  changes yet" instruction the audit was scoped to avoid, and some of the
+  needed mappings are genuinely ambiguous (e.g. does `SensorState::WARMUP`
+  map to `sensorHealth::SUSPECT`, or to nothing/`NORMAL`? does
+  `SensorState::INVALID` map to `OUT_OF_RANGE`?) — a real design decision,
+  not a mechanical rename, and not this audit's job to decide unilaterally.
+  (b) creates two copies of the same frozen contract that can silently
+  diverge; the GUI team's copy is the authoritative one and should stay
+  the only one until a real wire-serialization phase needs firmware's own
+  reference copy.
+- **Impact:** `docs/known-issues.md`'s GUI-telemetry-contract entry is
+  updated to reflect that the contract now genuinely exists (resolving the
+  Phase 3 "not found" flag) while recording that firmware still implements
+  none of its wire format. The full message-by-message compatibility
+  matrix was delivered directly to the user rather than duplicated into a
+  docs file, since it's an audit finding tied to this specific moment in
+  both codebases, not a standing architectural decision.
+- **Phase/date:** Post-Phase-3, pre-Phase-4, 2026-08-17.
+- **Phase/date:** Phase 3, 2026-08-17.

@@ -20,37 +20,51 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 2 complete** (2026-08-17) — fused link-degradation predictor
-(RSSI EWMA/slope + PDR + staleness), integrated into Phase 1's routing, on
-top of the Phase 0 firmware foundation. See
-[`docs/phase-log.md`](docs/phase-log.md) for the full record.
+**Phase 3 complete** (2026-08-17) — sensor anomaly/failure detection
+(MAD-Z + flatline + a 6-state sensor health machine), on top of the
+Phase 0-2 firmware foundation. See [`docs/phase-log.md`](docs/phase-log.md)
+for the full record.
 
 What exists and works: Arduino sketch structure (`firmware/PredictiveMesh/`),
 centralized node identity (`THIS_NODE_ID` in `src/config.h`), the
 `MeshPacket` wire format, a real ESP-NOW transport layer, structured Serial
 logging (Phase 0); a real distance-vector routing table with
 HELLO/route-advertisement beacons, staleness expiry, and the priority-flag
-override (Phase 1); and now a real predictor — per-neighbor RSSI EWMA +
+override (Phase 1); a real predictor — per-neighbor RSSI EWMA +
 least-squares slope, PDR EWMA, a fused `link_score`, a two-threshold
-debounced hysteresis state machine, and an independent staleness fast-path
-— feeding into NORMAL route selection (Phase 2). Both routing and
-predictor keep the Arduino-free-core / thin-adapter split
+debounced hysteresis state machine, and an independent staleness fast-path,
+feeding into NORMAL route selection (Phase 2); and now a real sensor
+anomaly engine — boot-time median/MAD calibration (with a variance safety
+envelope and bounded retry), a modified-Z-score spike/jump detector, an
+independent flatline/stuck detector, and a debounced
+`WARMUP/NORMAL/ANOMALY/FLATLINE/STALE/INVALID` state machine, with local
+telemetry (`anomaly::getTelemetry()`) and events, explicitly kept separate
+from routing/link health (Phase 3). Routing, predictor, and anomaly all
+keep the Arduino-free-core / thin-adapter split
 (`src/routing/routing_core.h/.cpp` + `routing.h/.cpp`,
-`src/predictor/predictor_core.h/.cpp` + `predictor.h/.cpp`), each
-unit-tested with a host-compiled g++ harness — 21/21 (routing) and 31/31
-(predictor) checks passing, see `docs/testing.md`. As of Phase 2, the
-**whole Phase 0+1+2 sketch has also been compiled for real** against the
-installed `esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings
-after one real API-drift fix (`esp_now_send_cb_t`'s signature, see
-`docs/decisions.md`).
+`src/predictor/predictor_core.h/.cpp` + `predictor.h/.cpp`,
+`src/anomaly/anomaly_core.h/.cpp` + `anomaly.h/.cpp`), each unit-tested
+with a host-compiled g++ harness — 21/21 (routing), 31/31 (predictor),
+50/50 (anomaly) checks passing, see `docs/testing.md`. As of Phase 3, the
+**whole Phase 0+1+2+3 sketch has also been compiled for real** against the
+installed `esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings.
 
-What's stubbed (interfaces only, no algorithms): `anomaly/`,
-`reliability/`, `telemetry/`. Also not yet built: actual hop-by-hop
-relaying of a received `MSG_DATA` packet (routing decides a next hop;
-nothing acts on that decision for someone else's packet yet — that's the
-reliability layer's job), and live PDR evidence (`predictor::onSendResult()`
-is implemented and tested but has no live caller yet — no real unicast
-traffic exists to measure; see `docs/decisions.md`).
+What's stubbed (interfaces only, no algorithms): `reliability/`,
+`telemetry/`. Also not yet built: actual hop-by-hop relaying of a received
+`MSG_DATA` packet (routing decides a next hop; nothing acts on that
+decision for someone else's packet yet — that's the reliability layer's
+job), live PDR evidence (`predictor::onSendResult()` is implemented and
+tested but has no live caller yet — no real unicast traffic exists to
+measure), and OLED wiring for the anomaly flags (Node C — deferred, same
+reasoning as Phase 0's original OLED deferral). See `docs/decisions.md`.
+
+**Unresolved, needs your input:** Phase 3's task instructions referenced an
+external "GUI telemetry contract" (specific message types, GUI panels for
+sensor health) that does not exist anywhere in this repository — flagged
+explicitly rather than fabricated. See
+[`docs/known-issues.md`](docs/known-issues.md#gui-telemetry-contract--referenced-by-the-phase-3-task-spec-not-found-anywhere-in-this-repository).
+Share the real contract, or confirm none exists yet, before any future
+phase claims wire-format compatibility with a GUI.
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
@@ -64,13 +78,13 @@ validates that the firmware *builds*; nothing has run on real silicon yet
 
 ## Next movement
 
-**Waiting on explicit go-ahead for Phase 3** — do not start it
-unprompted. Per the roadmap in implementation-guide.html §06 (Hours 12+),
-later phases are the anomaly engine (§5.2: MAD Z-score + flatline
-detector) and the reliability layer (§5.4: hop-by-hop ACK, retransmit,
-duplicate filtering, and actual multi-hop `MSG_DATA` relaying).
+**Waiting on explicit go-ahead for Phase 4** — do not start it
+unprompted. Per the roadmap in implementation-guide.html §06 (Hours
+17-23, "required, not stretch"), the next phase is the reliability layer:
+hop-by-hop ACK, bounded retransmit, sequence-number duplicate filtering,
+and Packet Recovery Ratio logging (§07).
 
-Two things worth rereading before starting Phase 3:
+Things worth rereading before starting Phase 4:
 - [`docs/decisions.md`](docs/decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2) —
   the reliability layer's hop-by-hop ACK mechanism is the natural point to
   finally wire `predictor::onSendResult()` to a real unicast delivery
@@ -82,6 +96,8 @@ Two things worth rereading before starting Phase 3:
   NORMAL-avoids-the-weak-direct-link behavior. Revisit only once real
   hardware/attenuation data exists to check that condition for real — not
   before.
+- The GUI telemetry contract question above — resolve it before any phase
+  claims wire-format compatibility with a GUI.
 
 ## Workflow rules (durable — apply every session)
 

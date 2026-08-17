@@ -1,9 +1,10 @@
 # Architecture
 
-Status: **Phase 2 — transport + routing + predictor real, anomaly/reliability/telemetry
-still stubs.** This document describes what exists now and the shape it's
-built to grow into. It does not describe algorithms that aren't
-implemented yet — see [known-issues.md](known-issues.md) for those.
+Status: **Phase 3 — transport + routing + predictor + anomaly real,
+reliability/telemetry still stubs.** This document describes what exists
+now and the shape it's built to grow into. It does not describe algorithms
+that aren't implemented yet — see [known-issues.md](known-issues.md) for
+those.
 
 Source of truth for the *design* (topology, layer stack, algorithms) is
 [`implementation-guide.html`](../implementation-guide.html) at the repo root.
@@ -55,7 +56,7 @@ Bottom to top, matching implementation-guide.html §01:
 | Reliability (ACK, retransmit, dup-filter) | Stub interface only | `src/reliability/` |
 | Routing (distance-vector + priority override + link-health-aware selection) | **Implemented** (Phase 1, extended Phase 2) | `src/routing/` |
 | Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2) | `src/predictor/` |
-| Anomaly (MAD Z-score + flatline) | Stub interface only | `src/anomaly/` |
+| Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | Reporting (OLED + Serial/WebSerial) | Stub interface only | `src/telemetry/` |
 
 Data is meant to flow bottom-up: raw radio -> statistics -> routing
@@ -96,14 +97,17 @@ firmware/PredictiveMesh/
     ├── predictor/
     │   ├── predictor_core.h/.cpp <- pure EWMA/slope/PDR/hysteresis algorithm, no Arduino dependency
     │   └── predictor.h/.cpp      <- Arduino-facing adapter (millis/logger)
-    ├── anomaly/       <- stub
+    ├── anomaly/
+    │   ├── anomaly_core.h/.cpp   <- pure median/MAD/modified-Z/flatline/state-machine algorithm, no Arduino dependency
+    │   └── anomaly.h/.cpp        <- Arduino-facing adapter (analogRead/millis/logger)
     ├── reliability/   <- stub
     └── telemetry/     <- stub
 
 firmware/PredictiveMesh/test/
 ├── test_routing_core.cpp     <- host-compiled (g++) unit tests for routing_core
-└── test_predictor_core.cpp   <- host-compiled (g++) unit tests for predictor_core
-                                  see docs/testing.md for both
+├── test_predictor_core.cpp   <- host-compiled (g++) unit tests for predictor_core
+└── test_anomaly_core.cpp     <- host-compiled (g++) unit tests for anomaly_core
+                                  see docs/testing.md for all three
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -149,7 +153,7 @@ has an OLED, its neighbor list — is looked up from that single value via
 [decisions.md](decisions.md) for why this was chosen over MAC-based
 auto-detection.
 
-## Packet flow (as of Phase 2)
+## Packet flow (as of Phase 3)
 
 1. `transport::begin()` brings up WiFi in station mode, fixes the channel,
    initializes ESP-NOW, and registers the recv/send callbacks.
@@ -189,9 +193,19 @@ auto-detection.
    logs `[ROUTE] dst=... next=... hops=... priority=...`, and fires a
    `ROUTE_SELECTED` event to whatever's registered via
    `routing::setEventCallback()`.
+8. Independently of any received packet, `app::loop()` samples both
+   sensors every `SENSOR_SAMPLE_INTERVAL_MS` — `anomaly::sample(POT)` then
+   `anomaly::sample(LDR)`, each a real `analogRead()` fed through
+   `anomaly_core::evaluate()`. `anomaly::tick()` also runs every iteration,
+   independently sweeping both sensors for the staleness state (Part 4 —
+   see "Anomaly / sensor-health layer (Phase 3)" below). This path is
+   completely disjoint from the packet-receive path above — sensor
+   readings never touch `MeshPacket`, and mesh traffic never touches
+   sensor state.
 
 See [protocol.md](protocol.md) for why no wire format changed in Phase 2
-and [testing.md](testing.md) for how both algorithms are validated without
+or Phase 3, and [testing.md](testing.md) for how all three algorithms are
+validated without
 hardware.
 
 ## Routing layer (Phase 1)
@@ -281,6 +295,62 @@ avoids the weak direct link" demo behavior. See
 [decisions.md](decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule)
 for the full reasoning, including the precise condition under which the
 exclusion should eventually be removed.
+
+## Anomaly / sensor-health layer (Phase 3)
+
+`src/anomaly/` follows the same pure-core/adapter split as routing and
+predictor:
+
+- **`anomaly_core.h`/`.cpp`** — the real algorithm: boot-time median/MAD
+  calibration (with a variance safety envelope and bounded retry), the
+  modified-Z-score spike/jump detector, an independent flatline/stuck
+  detector, and a 6-state, debounced, recovering state machine. Zero
+  Arduino dependency — takes a generic, timestamped `SensorObservation` in,
+  never touches `analogRead()`/`millis()` directly. This is what
+  `firmware/PredictiveMesh/test/test_anomaly_core.cpp` compiles and runs
+  directly with a host compiler.
+- **`anomaly.h`/`.cpp`** — the thin Arduino-facing adapter. Owns two
+  `SensorCore` instances (POT at `GPIO34`, LDR at `GPIO35`), performs the
+  blocking boot-calibration sequence, calls `analogRead()` every
+  `SENSOR_SAMPLE_INTERVAL_MS`, logs the evidence behind every evaluation,
+  and fires `SENSOR_ANOMALY`/`SENSOR_FLATLINE`/`SENSOR_RECOVERED`/
+  `SENSOR_STALE`/`SENSOR_INVALID` events.
+
+**Sensor abstraction.** `anomaly_core` never hardcodes which physical
+sensor it's evaluating — it accepts a generic
+`SensorObservation{sensor_id, timestamp_ms, value, valid}`, reusable for
+any future sensor, not just the potentiometer/LDR pair. `sensor_id` is an
+opaque integer the adapter assigns; the core never branches on it. See
+[decisions.md](decisions.md#sensor-abstraction-is-generic-sensorobservation-not-hardwired-to-the-potentiometerldr).
+
+**State machine.** `WARMUP → NORMAL → {ANOMALY, FLATLINE}`, with `STALE`
+and `INVALID` reachable independently from any state. Entry into
+`ANOMALY`/exit back to `NORMAL` are debounced (`ANOMALY_CONSECUTIVE_COUNT`/
+`ANOMALY_RECOVERY_COUNT`, 2 samples each — the guide's own MAD-Z pseudocode
+has no such debounce, but this phase's own requirements do); `FLATLINE`'s
+entry is inherently persistent via `ANOMALY_STUCK_N` and its exit is
+separately debounced (`ANOMALY_FLATLINE_RECOVERY_COUNT`). When a sample
+would trigger both detectors at once, FLATLINE wins — see
+[decisions.md](decisions.md#one-discrete-sensorstate-not-two-independent-booleans--with-a-documented-flatline-over-anomaly-priority)
+for the full reasoning and why this doesn't contradict
+implementation-guide.html's "both flags reported independently" framing
+(both raw evidence values stay independently exposed in telemetry
+regardless of which state the top-level label picks).
+
+**Telemetry & events.** `anomaly::getTelemetry(sensor)` exposes a complete
+`SensorTelemetry` snapshot (raw value, median, MAD, modified-Z, threshold,
+flatline state/duration, sensor state, validity) for any future consumer.
+Events fire on real state transitions only, not every sample. **No GUI
+wire-format claim is made** — this phase's task spec referenced an
+external GUI telemetry contract that does not exist anywhere in this
+repository; see
+[decisions.md](decisions.md#gui-telemetry-contract-referenced-but-not-found-in-this-repository--flagged-not-fabricated)
+and [known-issues.md](known-issues.md).
+
+**Separation from network health.** `anomaly_core`/`anomaly.cpp` have no
+reference to `routing_core`/`predictor_core` or vice versa — a sensor
+anomaly never affects a routing decision. See
+[decisions.md](decisions.md#sensor-health-and-networklink-health-are-separate-failure-domains--no-coupling-added).
 
 ## Practical theory notes
 

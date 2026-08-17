@@ -106,15 +106,28 @@ exists, and
 [decisions.md](decisions.md#broadcast-peer-as-the-phase-0-espnow-bootstrap)
 for why a broadcast peer is registered in the meantime.
 
+## Anomaly (Phase 3)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `ANOMALY_CALIBRATION_SAMPLE_COUNT` | `src/config.h` | `100` samples | implementation-guide.html §5.2 / boot-sequence diagram: "Buffer ~100 raw ADC samples per sensor (boot calibration window)". |
+| `ANOMALY_MAD_FLOOR` | `src/config.h` | `3.0` ADC LSB | The guide's exact stated value: "~3 ADC LSB on a 12-bit ADC — real noise floor". |
+| `ANOMALY_MODIFIED_Z_THRESHOLD` | `src/config.h` | `3.5` | Iglewicz & Hoaglin modified Z-score threshold — the guide's exact stated value ("\|z\| > 3.5"). |
+| `ANOMALY_FLATLINE_EPS` | `src/config.h` | `2.0` ADC LSB | The guide names `EPS` in its pseudocode but gives no numeric value — a starting/placeholder figure, chosen just above the expected ADC quantization noise floor. |
+| `ANOMALY_STUCK_N` | `src/config.h` | `50` samples | The guide's exact stated value ("STUCK_N ~ 50 samples"). |
+| `ANOMALY_MAX_CALIBRATION_VARIANCE` | `src/config.h` | `400.0` LSB² | The guide's boot-sequence diagram describes a "variance within safety envelope?" check with no numeric envelope given — a starting/placeholder figure (std-dev ≈ 20 LSB), well above expected resting-noise variance, well below an actively-manipulated or floating-pin signal's. |
+| `ANOMALY_CALIBRATION_MAX_RETRIES` | `src/config.h` | `10` | Bounds the guide's "restart calibration" loop, which its own diagram draws as an unconditional retry. See [decisions.md](decisions.md#boot-calibration-is-a-blocking-anomalyinit-step-with-bounded-not-infinite-retry). |
+| `SENSOR_SAMPLE_INTERVAL_MS` | `src/config.h` | `150` ms | Matches the guide's stated main-loop cadence ("every evaluation cycle (~100-200 ms)"). |
+| `ANOMALY_CALIBRATION_SAMPLE_INTERVAL_MS` | `src/config.h` | `10` ms | Deliberately faster than `SENSOR_SAMPLE_INTERVAL_MS` — keeps the ~100-sample boot calibration to ~1s/sensor instead of ~15s. See [decisions.md](decisions.md#calibration-uses-a-separate-faster-sample-interval-than-steady-state-evaluation). |
+| `ANOMALY_CONSECUTIVE_COUNT` | `src/config.h` | `2` samples | Consecutive over-threshold samples required before the sensor STATE transitions NORMAL → ANOMALY. Not guide-specified (the guide's own MAD-Z pseudocode has no debounce); required by this phase's own task spec. See [decisions.md](decisions.md#debounceecovery-persistence-counts-for-anomaly-flatlines-own-anomaly_stuck_n-already-provides-entry-persistence). |
+| `ANOMALY_RECOVERY_COUNT` | `src/config.h` | `2` samples | Consecutive under-threshold samples required to recover ANOMALY → NORMAL. Symmetric with `ANOMALY_CONSECUTIVE_COUNT`. |
+| `ANOMALY_FLATLINE_RECOVERY_COUNT` | `src/config.h` | `2` samples | Consecutive non-flat samples required to recover FLATLINE → NORMAL — a single changed sample alone must not instantly clear FLATLINE. |
+| `ANOMALY_STALE_TIMEOUT_MS` | `src/config.h` | `450` ms (`3 × SENSOR_SAMPLE_INTERVAL_MS`) | Independent, time-driven staleness check for a sensor's observation stream. In this phase's actual local-ADC wiring this will rarely fire (samples are read synchronously); the mechanism exists because `anomaly_core` is designed to be reusable for a sensor whose observations could genuinely stop arriving. See [decisions.md](decisions.md#sensor-abstraction-is-generic-sensorobservation-not-hardwired-to-the-potentiometerldr). |
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-These belong to the anomaly layer (§5.2), which isn't implemented as of
-Phase 2. Recorded here so they're not lost before that phase starts. (The
-predictor's own timing parameters — heartbeat/sample interval, slope
-window, PDR window, RSSI EWMA alpha — are wired for real as of Phase 2; see
-the "Predictor (Phase 2)" table above instead of this one.)
-
-| Parameter | Starting value | Why |
-|---|---|---|
-| MAD-Z threshold | 3.5 | Iglewicz & Hoaglin modified Z-score threshold. |
-| Flatline STUCK_N | ~50 samples | Consecutive unchanged samples before flagging STUCK. |
+Nothing remains in this category as of Phase 3 — the predictor's timing
+parameters were wired in Phase 2 (see the "Predictor (Phase 2)" table
+above) and the anomaly engine's in Phase 3 (see the "Anomaly (Phase 3)"
+table above). This section is kept as a placeholder heading for whatever a
+future phase (reliability, §5.4) introduces next.
