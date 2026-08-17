@@ -11,6 +11,7 @@
 #include "telemetry/telemetry.h"
 #include "ucb1/ucb1.h"
 #include "apptraffic/apptraffic.h"
+#include "oled/oled.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -186,6 +187,7 @@ void setup() {
   ucb1::init();
 #endif
   apptraffic::init();
+  oled::init();
 
   logger::info("Phase 7 firmware ready - entering main loop");
 }
@@ -204,6 +206,7 @@ void loop() {
   reliability::tick();
   apptraffic::tick();
   telemetry::tick();
+  oled::tick();
 
   if (now - g_lastSensorSample >= SENSOR_SAMPLE_INTERVAL_MS) {
     g_lastSensorSample = now;

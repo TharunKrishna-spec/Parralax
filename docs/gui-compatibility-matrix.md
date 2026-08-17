@@ -70,7 +70,7 @@ Every `TELEMETRY_HEARTBEAT_INTERVAL_MS` (1000ms), matching the contract exactly.
 | `from` / `to` | `thisNode().name` / `nodeName(neighbor)` | real |
 | `rssiDbm` | `predictor::linkState(neighbor).latestRssi` (new accessor) | real |
 | `rssiEwmaDbm` | `.ewmaRssi` | real |
-| `rssiSlopeDbPerSec` | `.slope` | real |
+| `rssiSlopeDbPerSec` | `.slope` | **misleadingly named in the contract for this firmware** — `predictor_core`'s `slope` is a least-squares fit against *sample index* (0, 1, 2, ...), not elapsed wall-clock time (`predictor_core.h`: "dBm per sample step" — a deliberate simplification, since RSSI samples arrive on the fixed `ROUTING_HELLO_INTERVAL_MS` beacon cadence, not a documented-as-fixed real-time interval). Reported under the contract's field name since it's the closest and only real slope figure available, documented here rather than silently passed off as a true per-second rate — same pattern as `endToEndLatencyMs` below |
 | `pdr` / `pdrEwma` | `.pdrEwma` (both fields report the same EWMA — predictor_core has no separate raw/smoothed PDR distinction, only the EWMA itself) | real, with the noted duplication |
 | `stalenessMs` | `now - .lastUpdateMs` | real |
 | `linkScore` | `.linkScore` | real |

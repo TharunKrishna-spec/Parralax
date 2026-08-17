@@ -115,9 +115,33 @@ Nothing left in `src/` is a stub interface. The one gap every phase since
 Phase 4 documented — `reliability::send()` had no automatic caller — is
 now resolved (`src/apptraffic/`); UCB1's bandit tables (when enabled) and
 `STATISTICS`'s telemetry counters will accumulate real data once flashed,
-instead of staying at their honest neutral defaults. What's still not
-built: OLED wiring for the anomaly flags (Node C — deferred, same
-reasoning as Phase 0's original OLED deferral).
+instead of staying at their honest neutral defaults.
+
+**OLED integration pass (2026-08-18, not phase-numbered — a standalone
+addition after Phase 7.1):** `src/oled/` now exists and OLED is no longer
+deferred. The team confirmed a real hardware fact this pass needed first:
+Node S runs a 0.96" SSD1306, Node C a 1.3" SH1106 — two different
+controllers, a real deviation from implementation-guide.html §03's "2x
+identical" BOM (not silently resolved either direction — documented in
+`docs/decisions.md`). `oled.cpp` selects the matching Adafruit driver per
+`THIS_NODE_ID` at runtime (never a second per-node compile flag). Content
+is grounded in the guide's own per-node text, not one generic layout: Node
+S auto-cycles node identity and live `predictor::linkScore()` for each of
+its own direct neighbors (the guide's "current best path"), with a
+temporary override on a real neighbor HEALTHY↔UNHEALTHY transition; Node C
+auto-cycles node identity and its two independent SPIKE/JUMP
+(`SensorState::ANOMALY`) / STUCK (`SensorState::FLATLINE`) flags per
+sensor (the guide's "shown independently"). `oled_core` (pure
+screen-scheduling/rate-limiting logic) is host-tested, 22/22 checks;
+`main.cpp` needed exactly 3 new lines (include + `init()` + `tick()`) —
+zero changes to any existing single-subscriber event-callback wiring
+(`telemetry`'s own `onRouteEvent`/`onLinkEvent`/etc. registrations are
+untouched; OLED polls existing side-effect-free accessors instead of
+adding a fourth subscriber). Compiles clean on a real ESP32 build, both
+`ENABLE_UCB1` configs (957,292/50,376 bytes at the default `=0`). **Not
+run on real hardware** — no display has actually shown a frame yet. See
+`docs/decisions.md`'s OLED integration entry, `docs/testing.md`, and
+`docs/hardware-readiness.md`'s Part 3/4/5.
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
@@ -147,17 +171,20 @@ also requires physical hardware rehearsal this phase deliberately did not
 attempt). The two blockers Phase 7 needed team input for — the real MAC
 mapping and the board-label/`NODE_C` question — are now resolved. Remaining
 candidates for what comes next (none started, none scoped): physical
-flashing (now unblocked on the software side; still needs the team's
-answers on OLED controller/size and UART/RESET/BOOT pin confirmation — see
-`docs/hardware-readiness.md`), and OLED wiring (deferred since Phase 0).
+flashing (now unblocked on the software side, including OLED; still needs
+the team's answer on UART/RESET/BOOT pin confirmation — see
+`docs/hardware-readiness.md`). OLED is no longer an open item — `src/oled/`
+is implemented (2026-08-18 pass), just not yet hardware-verified.
 
 Things worth rereading before starting whatever's next:
 - [`docs/hardware-readiness.md`](docs/hardware-readiness.md) — the real
-  MAC table and `NODE_C`=board-"E" confirmation are filled in (Phase 7),
-  but the OLED controller/size contradiction (SSD1306 vs SH1106) and the
-  0.96" bench sketch's likely `0x78`/`0x3C` address bug are still open team
-  questions, and UART/RESET/BOOT pins still need confirming against the
-  physical boards before flashing.
+  MAC table and `NODE_C`=board-"E" confirmation are filled in (Phase 7);
+  the OLED controller/size contradiction is now RESOLVED (Node S =
+  SSD1306, Node C = SH1106, confirmed 2026-08-18 — see Part 3/4/5); the
+  0.96" bench sketch's likely `0x78`/`0x3C` address bug is still a
+  standing note for the hardware team's own sketch (doesn't block
+  firmware, which already uses `0x3C`); UART/RESET/BOOT pins still need
+  confirming against the physical boards before flashing.
 - [`docs/decisions.md`](docs/decisions.md#phase-7--resolved-reliabilitysend-now-has-a-live-automatic-caller-node_a---node_s) —
   `reliability::send()` now has a real caller (`src/apptraffic/`, `NODE_A
   -> NODE_S`) as of Phase 7; UCB1's bandit tables and telemetry's

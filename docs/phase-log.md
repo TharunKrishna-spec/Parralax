@@ -871,3 +871,88 @@ size/controller confirmation and the 0.96" sketch's address question
 (not-yet-done) follow-up: re-run the Phase 6 GUI-parser harness against
 this phase's `ROUTE_UPDATE` fix for full end-to-end confirmation before
 demo rehearsal. Do not start any of these without explicit instruction.
+
+## OLED integration pass (not phase-numbered — a standalone feature addition after Phase 7.1)
+**Date:** 2026-08-18
+**Status:** Complete. Mesh confirmed running on real hardware by the user
+at the start of this pass (first real-silicon confirmation this project
+has had); OLED itself has not yet been hardware-verified.
+
+### Objective
+Implement the OLED local display (Nodes S and C only), deferred since
+Phase 0 pending a display library decision. Blocked on one real fact only
+the team could supply: which physical controller is actually wired on S
+and C — the guide's BOM says two identical 0.96" SSD1306 units, but the
+hardware team's own two bring-up sketches (`hardware code/`) use two
+different controllers (SSD1306 and SH1106), a contradiction
+`hardware-readiness.md` had flagged as open since the Phase 6 pre-flash
+audit. Asked directly; team confirmed Node S = 0.96" SSD1306, Node C =
+1.3" SH1106 — a real, permanent hardware fact, not a still-open
+evaluation.
+
+### What was built
+- `src/oled/oled_core.h/.cpp` — pure, Arduino-free screen-scheduling state
+  machine (auto-cycle timing, a temporary event override, redraw
+  rate-limiting), mirroring the `*_core` split every other module uses.
+- `src/oled/oled.h/.cpp` — the Arduino adapter: constructs both
+  `Adafruit_SSD1306`/`Adafruit_SH1106G` objects, selects the one matching
+  `THIS_NODE_ID` at runtime, owns every Adafruit_GFX drawing call.
+- Content grounded directly in implementation-guide.html §03's own
+  per-node text (not the generic 4-screen layout a task brief suggested):
+  Node S cycles node identity and live `predictor::linkScore()` for each
+  of its own direct neighbors (the guide's "current best path"), with a
+  temporary override on a real neighbor HEALTHY↔UNHEALTHY transition; Node
+  C cycles node identity and its two independent SPIKE/JUMP
+  (`SensorState::ANOMALY`) / STUCK (`SensorState::FLATLINE`) flags per
+  sensor (the guide's "SPIKE/JUMP vs STUCK, shown independently").
+- `main.cpp`: 3 new lines (`#include`, `oled::init()`, `oled::tick()`) —
+  no change to any existing event-callback registration.
+- `config.h`: `OLED_SCREEN_CYCLE_MS`/`OLED_EVENT_DISPLAY_MS`/
+  `OLED_REFRESH_MIN_INTERVAL_MS`.
+- `test/test_oled_core.cpp` — 22 new host checks.
+
+Full reasoning (why runtime driver selection over a second compile flag,
+why polling over a fourth event-callback subscriber, why Node S's "current
+best path" reads direct-neighbor link state rather than calling
+`routing::getNextHop()`) is in
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot).
+
+### What was explicitly NOT changed
+`routing`/`predictor`/`anomaly`/`reliability`/`telemetry`/`apptraffic`
+source — zero lines touched in any of them. No new event-callback slot
+added to any module. `gui-main/` untouched
+(`git diff --stat -- gui-main/` empty before and after).
+
+### Validation performed
+- `test_oled_core.cpp`: 22/22 new checks (screen cycling, override
+  trigger/expiry/suppression, redraw rate-limiting, `millis()` wraparound
+  safety, defensive zero-count clamp).
+- Full existing suite re-run: `test_routing_core` 37/37,
+  `test_predictor_core` 31/31, `test_anomaly_core` 50/50,
+  `test_reliability_core` 88/88, `test_ucb1_core` 26/26,
+  `test_telemetry_core` 99/99, `test_apptraffic_core` 29/29 — **382/382
+  total, all eight host suites, actually run.**
+- **Real `arduino-cli compile` performed for BOTH configurations**, after
+  fixing two real build errors this pass's own first compile attempt
+  surfaced (`Adafruit_GFX` has no `clearDisplay()`/`display()` — those are
+  per-subclass, not base-class members; one genuinely dead helper
+  function): `ENABLE_UCB1=0` (957,292 bytes flash / 50,376 bytes RAM) and
+  `ENABLE_UCB1=1` (959,436 bytes flash / 50,776 bytes RAM) — both clean, 0
+  errors, 0 warnings. Restored to `ENABLE_UCB1=0` and re-verified
+  byte-identical to the first compile.
+- `git diff --stat -- gui-main/` confirmed empty both before and after.
+- No hardware-dependent validation — the display code has never run
+  against a real display.
+
+### Git
+No commits were made by this session. Working tree at the start of this
+pass was clean at `9430cce`.
+
+### Next (not started, awaiting explicit go-ahead)
+A full feature-matrix and bug audit against an external review (31
+findings across P0-P2) was requested immediately following this pass —
+see the next conversation turn / a future phase-log entry once that
+completes. Physical flashing remains the other standing candidate,
+unblocked on the OLED side as of this pass but still needing
+UART/RESET/BOOT pin confirmation. Do not start either without explicit
+instruction.

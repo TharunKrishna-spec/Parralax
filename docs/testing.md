@@ -5,6 +5,88 @@ nothing has been flashed yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## OLED integration pass — actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs)
+
+### 1. Host tests (`oled_core`'s pure screen-scheduling/rate-limiting logic)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/oled/oled_core.cpp test_oled_core.cpp -o test_oled_core
+(clean compile, zero warnings)
+$ ./test_oled_core
+... (22 checks, see test/test_oled_core.cpp)
+22/22 checks passed
+EXIT_CODE=0
+```
+
+Covers: first-tick-always-redraws, rate-limiting an immediate re-tick,
+interval-driven redraw with no screen change, auto-cycle advance timing (2-
+and 3-screen rotations, including wraparound of the rotation itself),
+`triggerOverride()` taking over immediately, an active override suppressing
+the normal auto-cycle even past a full cycle interval, override expiry
+resuming the auto-cycle and resetting its own timing base, `millis()`
+32-bit-wraparound safety for the override deadline, and `init()`
+defensively clamping a zero screen count to 1.
+
+Re-ran the full existing suite alongside this one to confirm nothing
+regressed: `test_routing_core` 37/37, `test_predictor_core` 31/31,
+`test_anomaly_core` 50/50, `test_reliability_core` 88/88, `test_ucb1_core`
+26/26, `test_telemetry_core` 99/99, `test_apptraffic_core` 29/29 —
+**382/382 total, all eight host suites, actually run** (360 Phase-7.1
+baseline + 22 new).
+
+**What this is not:** `oled.cpp` (the Arduino adapter — display object
+construction, per-node driver selection, every Adafruit_GFX drawing call,
+the direct-neighbor edge-detection loop) is untested by any host harness,
+same caveat as every other adapter in this project (`transport.cpp`/
+`logger.cpp` have no host tests either, for the same reason — real
+Wire/I2C/Adafruit_GFX calls can't run on a host compiler) — reviewed by
+hand, validated by the real ESP32 compile below.
+
+### 2. Real ESP32 compilation — BOTH `ENABLE_UCB1` configurations
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=0 (default)
+Sketch uses 957292 bytes (73%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 50376 bytes (15%) of dynamic memory, leaving 277304 bytes for local variables. Maximum is 327680 bytes.
+```
+
+```
+# config.h temporarily edited to ENABLE_UCB1=1
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all   # ENABLE_UCB1=1
+Sketch uses 959436 bytes (73%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 50776 bytes (15%) of dynamic memory, leaving 276904 bytes for local variables. Maximum is 327680 bytes.
+# config.h restored to ENABLE_UCB1=0 (required default) and re-verified — identical
+# byte counts to the first compile above (957292/50376), confirming an exact restore.
+```
+
+**Both configurations compiled clean — 0 errors, 0 warnings, `esp32:esp32`
+core 3.3.11 — after fixing two real build errors found during this pass**
+(`Adafruit_GFX` has no `clearDisplay()`/`display()` member — those are
+declared per-subclass, not on the shared base pointer; fixed by dispatching
+through a small `Driver` enum to the concrete `Adafruit_SSD1306`/
+`Adafruit_SH1106G` object instead of the `Adafruit_GFX*` drawing pointer —
+and one genuinely dead helper function, removed). Flash grew by ~41KB over
+Phase 7.1's own `ENABLE_UCB1=0` figure (915,928 -> 957,292) — two new
+Adafruit display libraries (`Adafruit_SSD1306`, `Adafruit_SH110X`) plus
+`Adafruit_GFX`/`Adafruit_BusIO`, compiled into every board's image
+regardless of whether that board has a display (only `THIS_NODE_ID == NODE_S`
+/ `== NODE_C` ever call `begin()` on either driver at runtime). RAM grew by
+~1.7KB (48,656 -> 50,376) — the two display objects, `oled_core::State`,
+and Node S's small per-neighbor edge-detection arrays.
+
+### 3. GUI impact
+
+`git diff --stat -- gui-main/` — empty before and after. No `gui-main/`
+file read for modification or touched this pass.
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (all 8 suites) | **verified** — 382/382, see above |
+| ESP32 COMPILATION, `ENABLE_UCB1=0` (default) | **verified** — clean, 0 warnings, 0 errors |
+| ESP32 COMPILATION, `ENABLE_UCB1=1` | **verified** — clean, 0 warnings, 0 errors |
+| GUI (`gui-main/`) changes | **NONE** — `git diff --stat -- gui-main/` empty before and after |
+| PHYSICAL OLED HARDWARE | **NOT RUN — HARDWARE NOT AVAILABLE** — no display has actually shown a frame; see `docs/known-issues.md` |
+
 ## Phase 7.1 — red-team hardening pass (predictor/routing wording, ROUTE_UPDATE path reconstruction, route reason, HELLO MAC), actually compiled and run (host g++) + real ESP32 compile (both `ENABLE_UCB1` configs)
 
 ### 1. Host tests (`routing_core::reconstructPath()` + `telemetry_core::RouteReason`/variable-length `RouteEntry`)

@@ -72,8 +72,9 @@ Bottom to top, matching implementation-guide.html §01:
 | Predictor (RSSI EWMA/slope + PDR fused into `link_score`; staleness is an independent fast-path, not a third fused term — see below) | **Implemented** (Phase 2, PDR live-fed Phase 4) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline + sensor state machine) | **Implemented** (Phase 3) | `src/anomaly/` |
 | UCB1 adaptive ranking (stretch, optional) | **Implemented, disabled by default** (Phase 5) | `src/ucb1/` |
-| Reporting (Serial/WebSerial JSON telemetry) | **Implemented** (Phase 6) — OLED still not wired | `src/telemetry/` |
+| Reporting (Serial/WebSerial JSON telemetry) | **Implemented** (Phase 6) | `src/telemetry/` |
 | Application traffic (demo workload calling `reliability::send()`) | **Implemented** (Phase 7) | `src/apptraffic/` |
+| Local display (OLED, Nodes S and C only — mesh telemetry / link scores on S, local SPIKE-JUMP/STUCK anomaly flags on C) | **Implemented, not hardware-verified** (OLED integration pass) | `src/oled/` |
 
 Data is meant to flow bottom-up: raw radio -> statistics -> routing
 decisions -> reliability -> reporting. Phase 0 wired the bottom layer for

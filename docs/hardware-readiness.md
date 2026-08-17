@@ -30,8 +30,10 @@ Part C's tables below are kept with their original PENDING/BLOCKED
 language struck through rather than deleted, so this document still shows
 its own audit trail — see
 [decisions.md](decisions.md#real-mac-address-table-populated-physical-board-e-confirmed-as-logical-node_c).
-Everything else this document flags (OLED contradiction, UART/RESET/BOOT
-pins, WiFi channel RF survey) remains genuinely open.
+**Update (OLED integration pass, 2026-08-18): the OLED controller/size
+contradiction is RESOLVED** — see Part 3/4/5 below. Everything else this
+document flags (UART/RESET/BOOT pins, WiFi channel RF survey) remains
+genuinely open.
 
 ## Physical board inventory as reported
 
@@ -151,9 +153,9 @@ guide, or marked `UNKNOWN — TEAM INPUT REQUIRED`. Nothing is invented.
 | ESP-NOW role | source | relay (primary path) | relay (alternate path) | sink/root | relay (alternate path) |
 | Sensor(s) | Pot + LDR | Pot + LDR | Pot + LDR | Pot + LDR | Pot + LDR (all 5 wire identically per §03) |
 | Sensor GPIOs | 34 (pot), 35 (LDR) | 34, 35 | 34, 35 | 34, 35 | 34, 35 — confirmed against real hardware sketches (see Part 3/4/5 below) |
-| OLED type | none | none | none | 0.96" or 1.3" — **contradiction, unresolved, see Part 3/4/5** | 0.96" or 1.3" — **same contradiction** |
-| OLED controller | N/A | N/A | N/A | SSD1306 or SH1106 — **unresolved** | SSD1306 or SH1106 — **unresolved** |
-| OLED I2C address | N/A | N/A | N/A | `0x3C` (firmware constant; one bring-up sketch uses a likely-wrong `0x78` — see Part 3/4/5) | same |
+| OLED type | none | none | none | 0.96" — **confirmed, 2026-08-18** | 1.3" — **confirmed, 2026-08-18** |
+| OLED controller | N/A | N/A | N/A | SSD1306 — **confirmed** (`Adafruit_SSD1306`) | SH1106 — **confirmed** (`Adafruit_SH110X`/`Adafruit_SH1106G`) |
+| OLED I2C address | N/A | N/A | N/A | `0x3C` (firmware constant, used for both drivers; the 0.96" bring-up sketch's own `0x78` is that sketch's own likely bug — see Part 3/4/5) | same |
 | OLED SDA | N/A | N/A | N/A | GPIO21 (firmware constant + ESP32 Arduino default) | same |
 | OLED SCL | N/A | N/A | N/A | GPIO22 (same) | same |
 | UART TX/RX | UNKNOWN — TEAM INPUT REQUIRED (fixed by board design, not yet confirmed against silkscreen) | same | same | same | same |
@@ -299,10 +301,12 @@ for the team rather than silently editing hardware-test code outside this
 project's own firmware tree. (Firmware's own `OLED_I2C_ADDRESS`, `config.h`,
 is already `0x3C` — correct, unaffected by this.)
 
-**Finding 2 (real contradiction, source-of-truth vs. hardware evidence):
-implementation-guide.html's BOM specifies "2x 0.96" SSD1306 OLED" — two
-*identical* displays. The hardware evidence shows two *different* bench-test
-sketches for two *different* OLED types:**
+**Finding 2 (real, CONFIRMED contradiction, source-of-truth vs. hardware
+evidence — resolved 2026-08-18): implementation-guide.html's BOM specifies
+"2x 0.96" SSD1306 OLED" — two *identical* displays. The team has since
+confirmed the physical boards genuinely carry two *different* OLED
+modules — reading (b) from the two-reading analysis this section
+originally posed, not reading (a):**
 
 | | implementation-guide.html §03 BOM | Hardware bring-up sketches |
 |---|---|---|
@@ -310,26 +314,22 @@ sketches for two *different* OLED types:**
 | Controller | **SSD1306** (only one ever named) | 0.96" sketch: **SSD1306** (`Adafruit_SSD1306`). 1.3" sketch: **SH1106** (`Adafruit_SH110X`/`Adafruit_SH1106G`) — a genuinely different controller chip requiring a genuinely different driver library |
 | I2C address | `0x3C` (guide, both instances) | 0.96" sketch: `0x78` (likely wrong, see Finding 1). 1.3" sketch: `0x3C` (correct) |
 
-**Per the explicit source-of-truth rule: this is a real contradiction,
-reported, not silently resolved.** Two honest readings are possible: (a)
-the hardware team is evaluating two candidate OLED modules and will settle
-on **one** size/controller for both S and C before final bring-up (most
-consistent with the guide's own "2x identical" BOM), or (b) the two
-physical OLED-equipped boards genuinely have two different modules
-installed, a real deviation from the guide's BOM. **Neither is assumed.**
-This matters for firmware because OLED wiring itself is still deferred
-(unchanged since Phase 0 — no `Adafruit_GFX`/`Adafruit_SSD1306`/
-`Adafruit_SH110X` dependency exists anywhere in `firmware/PredictiveMesh/src/`),
-but *which* library(ies) that future phase would need depends entirely on
-this answer — if S and C end up with different controllers, firmware would
-need genuine node-specific OLED handling (not "one library across all
-nodes"), a real added-scope question for whoever picks up OLED wiring
-next.
+**RESOLVED, 2026-08-18: reading (b) is the real, confirmed answer** — the
+two physical OLED-equipped boards genuinely have two different modules
+installed (Node S: 0.96" SSD1306; Node C: 1.3" SH1106), a real, permanent
+deviation from the guide's "2x identical" BOM, confirmed directly by the
+team rather than assumed. `src/oled/oled.cpp` now implements genuine
+node-specific OLED handling (not "one library across all nodes") — both
+`Adafruit_SSD1306` and `Adafruit_SH110X`/`Adafruit_SH1106G` are real
+dependencies of `firmware/PredictiveMesh/` as of this pass, with the
+correct driver selected per `THIS_NODE_ID` at runtime. See
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot).
 
-**Action needed:** confirm with the hardware team (1) which OLED
-size/controller is actually going on S and C (one type or two), and (2)
-whether the 0.96" sketch's `0x78` address needs fixing to `0x3C` before
-that sketch is used as a real bench test.
+**Remaining action:** whether the hardware team's own 0.96" bring-up
+sketch (`hardware code/0.96esp32node/0.96esp32node.ino`, not
+`firmware/PredictiveMesh/`) needs its own `0x78` fixed to `0x3C` — still
+open, does not block firmware (which already uses `0x3C` for both
+drivers).
 
 ## Part F — application traffic — RESOLVED Phase 7
 

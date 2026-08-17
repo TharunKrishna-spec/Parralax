@@ -38,16 +38,27 @@ implementation-guide.html found:
 2. **Real contradiction between the guide's BOM and the hardware
    evidence:** the guide specifies 2x *identical* 0.96" SSD1306 displays;
    the hardware team has bench-tested two *different* controllers (0.96"
-   SSD1306 and 1.3" SH1106, needing different Arduino libraries). Not
-   resolved — reported per the standing "identify the contradiction,
-   don't silently resolve it" rule.
+   SSD1306 and 1.3" SH1106, needing different Arduino libraries).
+
+**RESOLVED as of the OLED integration pass (2026-08-18): confirmed by the
+team as a real, permanent hardware fact, not a still-open evaluation.**
+Node S runs the 0.96" SSD1306, Node C runs the 1.3" SH1106 — two genuinely
+different physical modules, a real deviation from the guide's "2x
+identical" BOM. `src/oled/oled.cpp` selects the matching Adafruit driver
+per `THIS_NODE_ID` at runtime (never a per-node compile flag — see
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot)).
+Firmware's own `OLED_I2C_ADDRESS` (`0x3C`) is used for both drivers
+regardless — the 0.96" sketch's likely-wrong `0x78` is that bench sketch's
+own bug, not something firmware inherited.
 
 Full detail, including the exact sketch excerpts and reasoning:
 [hardware-readiness.md](hardware-readiness.md)'s Part 3/4/5 section and
 [decisions.md](decisions.md#hardware-teams-096-oled-bench-sketchs-i2c-address-0x78-flagged-as-a-likely-bug-not-silently-fixed).
-Neither finding blocks anything currently built — OLED wiring in
-`firmware/PredictiveMesh/` remains deferred, unchanged since Phase 0 —
-but both need team input before that future phase can safely start.
+OLED is now implemented in `firmware/PredictiveMesh/src/oled/` (compiles
+clean, real ESP32 build, both `ENABLE_UCB1` configs) — see
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot)
+and [testing.md](testing.md). **Still `NOT RUN — HARDWARE NOT AVAILABLE`**
+on a real display — nothing has been flashed yet.
 
 ## Hardware not currently flashed
 
@@ -59,7 +70,10 @@ but the following cannot be validated until boards are actually flashed:
 - [ ] Actual RSSI validation (`info->rx_ctrl->rssi` returning real, sane values on core 3.x)
 - [ ] Actual WiFi channel validation (do all five boards actually agree on `MESH_WIFI_CHANNEL` in practice?)
 - [ ] Actual ADC validation (`analogRead()` on GPIO34/35 behaving correctly with ESP-NOW active — this is exactly the ADC2-after-radio-init trap documented in `docs/parameters.md`)
-- [ ] Actual OLED validation (SSD1306 answering at `0x3C` on GPIO21/22)
+- [ ] Actual OLED validation (Node S's SSD1306 and Node C's SH1106 both
+      answering at `0x3C` on GPIO21/22, and `src/oled/oled.cpp` actually
+      driving them — code exists and compiles clean as of 2026-08-18, but
+      has never run against a real display)
 - [ ] Actual buzzer validation (GPIO25 driving the piezo module)
 
 Software validation for Phase 0 consisted of compilation, static
@@ -201,18 +215,23 @@ and [hardware-readiness.md](hardware-readiness.md)'s Part F. Not a bug;
 exactly the same gap Phase 4/5 already documented, now visible in the
 telemetry output itself rather than only in internal counters.
 
-## Phase 3 anomaly engine — OLED wiring deliberately deferred
+## Phase 3 anomaly engine — OLED wiring deliberately deferred — SUPERSEDED (OLED integration pass, 2026-08-18)
 
 implementation-guide.html §06's roadmap bundles "wire both flags to the
 OLED on Node C" into the same Hours 12-17 bucket as the anomaly algorithm
-itself. This phase implements the algorithm and real Serial logging
-(`[ANOMALY]` lines) but does **not** add an OLED driver library or wire
-anything to Node C's display — doing so would mean adding a new external
-Arduino library dependency (Adafruit_SSD1306/GFX or U8g2) that doesn't
-exist in this project yet, the same open question Phase 0 already
-deferred with the same reasoning. See
-[decisions.md](decisions.md#anomaly-detection-scope-no-oledtelemetry-wiring-in-phase-3).
-Revisit when a future phase takes on the reporting/dashboard layer.
+itself. Phase 3 implemented the algorithm and real Serial logging
+(`[ANOMALY]` lines) but deliberately did not add an OLED driver library or
+wire anything to Node C's display — see
+[decisions.md](decisions.md#anomaly-detection-scope-no-oledtelemetry-wiring-in-phase-3)
+for the original reasoning (no display library existed yet in this
+project).
+
+**Superseded, 2026-08-18: `src/oled/` now exists.** Node C's OLED shows
+exactly the two independent flags this section originally deferred
+(SPIKE/JUMP from `anomaly_core::SensorState::ANOMALY`, STUCK from
+`SensorState::FLATLINE`), read directly via `anomaly::getTelemetry()` — no
+change to `anomaly_core`/`anomaly.cpp` themselves was needed or made. See
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot).
 
 ## Phase 3 anomaly engine — not yet run on hardware
 

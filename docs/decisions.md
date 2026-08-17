@@ -3128,3 +3128,173 @@ entries go at the bottom. Format:
   more than the prior string, exactly the length difference). No host
   test touches log strings, so no test change needed.
 - **Phase/date:** Phase 7.1, 2026-08-17.
+
+## OLED integration: per-node driver selection, screen content, and why polling (not a third event-callback slot)
+
+- **Decision:** Added `src/oled/` (`oled_core.h/.cpp` — pure, host-tested
+  screen-scheduling state machine; `oled.h/.cpp` — the Arduino adapter that
+  owns the real display objects and every Adafruit_GFX call). Four design
+  choices, each grounded in real evidence rather than the task's own
+  generic 4-screen suggestion:
+
+  1. **Two different physical OLED controllers, selected at runtime by
+     `THIS_NODE_ID`, not a second per-node compile flag.** The team
+     confirmed (2026-08-18) Node S is wired with the 0.96" SSD1306 and Node
+     C with the 1.3" SH1106 — a real, permanent hardware fact, not a
+     still-open evaluation (see the updated
+     [known-issues.md](known-issues.md) entry and
+     [hardware-readiness.md](hardware-readiness.md) Part 3/4/5). This is
+     itself a confirmed deviation from implementation-guide.html §03's BOM
+     line ("2x 0.96" SSD1306 OLED ... Node S ... and Node C ... only"),
+     which assumed two identical units — reported here per the standing
+     "identify the contradiction, don't silently resolve it" rule, not
+     silently built to match the guide instead of the real boards.
+     `oled.cpp` constructs both `Adafruit_SSD1306`/`Adafruit_SH1106G`
+     objects unconditionally (cheap — neither allocates its I2C
+     framebuffer until `begin()` runs, and only one of the two ever has
+     `begin()` called on a given board) and picks the active one via
+     `THIS_NODE_ID == NODE_S` / `== NODE_C`, the same runtime-comparison
+     pattern `apptraffic.cpp` already established for its own
+     single-node gate — never `#if THIS_NODE_ID == ...` (this project's
+     own documented pitfall: `NodeId` enumerators aren't visible to the
+     preprocessor). This keeps the "one shared source tree, only
+     `THIS_NODE_ID` differs per board" convention
+     (`hardware-readiness.md` Part C) intact instead of adding a second
+     per-board line to change before flashing.
+  2. **Node S and Node C show genuinely different content, not one shared
+     generic layout.** implementation-guide.html §03's own role table
+     gives them different jobs: Node S = "mesh telemetry (reroute events,
+     link scores)" / bring-up checklist "show live link_score for the
+     current best path"; Node C = "local anomaly flag" / "SPIKE/JUMP vs
+     STUCK, shown independently" / checklist "blank/idle ... at rest".
+     `oled.cpp` implements that split directly: Node C cycles
+     `NODE_STATUS` and `SENSOR_ANOMALY` (POT/LDR SPIKE and STUCK flags,
+     each read straight from `anomaly_core::SensorState::ANOMALY` /
+     `::FLATLINE` — the same two independently-tracked detectors
+     `anomaly_core.h` already documents as "never merged into one score",
+     so this is a direct surface of existing separation, not a new
+     derivation); Node S cycles `NODE_STATUS` and `LINK_QUALITY` (live
+     `predictor::linkScore()` for each of Node S's own direct neighbors —
+     B, D, A via `neighborsOf(NODE_S)` — with the highest-scoring one
+     marked `*`), plus a temporary `LINK_EVENT` override on a real
+     HEALTHY↔UNHEALTHY transition for one of those same direct neighbors.
+  3. **Node S's "current best path" is derived from its own direct-neighbor
+     link state, never from `routing::selectNextHop()`/`getNextHop()`.**
+     Node S is always the final destination for this project's one real
+     traffic flow (`NODE_A -> NODE_S`); it never calls `selectNextHop()`
+     for `destination == NODE_S` (it doesn't relay to itself), so it would
+     never naturally produce a `routing::RouteEvent` to observe for that
+     destination. `predictor::linkState()`/`linkScore()`/`isUnhealthy()`
+     are documented side-effect-free reads (`predictor.h`), so `oled.cpp`
+     reads those directly for Node S's own real, direct neighbors instead
+     — an honest, real signal instead of an invented "current path"
+     concept that doesn't actually exist from Node S's own vantage point.
+     Explicitly rejected: calling `routing::getNextHop()` from OLED's
+     tick() to *query* a route for display, which its own doc comment says
+     "fires a `ROUTE_SELECTED` event every time it's called" — calling
+     that from a periodic display refresh would inject synthetic routing
+     events unrelated to real packet activity into the same stream
+     `telemetry.cpp`'s route-change detection consumes.
+  4. **`oled::tick()` polls existing side-effect-free accessors and does
+     its own cheap edge-detection, instead of registering as a fourth
+     subscriber on `predictor::setEventCallback()`/
+     `anomaly::setEventCallback()`.** Every such callback slot in this
+     project supports "at most one callback" (see `routing.h`'s own doc
+     comment) and is already owned by `telemetry.cpp`. Rather than
+     restructure any existing single-callback module into a fan-out (a
+     real, invasive change touching working code, explicitly against this
+     pass's "preserve working behavior" instruction), `oled.cpp` tracks a
+     small per-neighbor "was this direct neighbor unhealthy last tick"
+     snapshot itself and calls `oled_core::triggerOverride()` on a real
+     transition it detects directly. Net effect: `main.cpp` needed exactly
+     three new lines (one `#include`, one `oled::init()`, one
+     `oled::tick()`) — zero changes to any existing event-callback
+     wiring, zero risk to `telemetry::onRouteEvent`/`onLinkEvent`/
+     `onAnomalyEvent`/`onReliabilityEvent`'s existing single-subscriber
+     registrations.
+
+- **Reason:** CLAUDE.md's standing rules — don't deviate from
+  implementation-guide.html without flagging a real conflict, and preserve
+  working mesh behavior via the smallest safe incremental change — both
+  applied directly here: the guide's own text gives real, different
+  per-node OLED content requirements the task prompt's generic
+  4-screen suggestion didn't capture, and the existing event-callback
+  architecture's "one subscriber per module" constraint made a
+  polling-based design strictly less invasive than an event-based one for
+  the same result.
+- **Alternatives considered:** (a) One identical 4-screen layout on both S
+  and C, per the task prompt's own suggested screens. (b) A second
+  per-node compile-time flag (`OLED_DRIVER_SSD1306`/`OLED_DRIVER_SH1106`)
+  alongside `THIS_NODE_ID`. (c) Reworking `predictor`/`anomaly`'s
+  `setEventCallback()` into a real multi-subscriber fan-out so OLED could
+  subscribe directly.
+- **Why alternatives were rejected:** (a) contradicts the guide's own
+  explicit, different role text for S vs. C — a real source-of-truth
+  document, not just the task prompt's own suggestion, which itself said
+  not to blindly reuse a layout the hardware/spec disagrees with. (b)
+  works, but adds a second line a human must remember to change correctly
+  per board, when a runtime comparison already does the same job safely
+  and matches the existing `THIS_NODE_ID`-comparison convention. (c) is a
+  real, working-code architectural change with no concrete evidence it's
+  needed — `main.cpp`'s existing five hand-written fan-out functions
+  (`onRouteEvent`/`onLinkEvent`/`onAnomalyEvent`/`onReliabilityEvent`) are
+  proof a same-effect fan-out can be added by hand at the `main.cpp` call
+  site without touching the module itself, which OLED didn't even need to
+  do given (4) above.
+- **Impact:** New files: `src/oled/oled_core.h/.cpp`,
+  `src/oled/oled.h/.cpp`, `test/test_oled_core.cpp`. Modified:
+  `src/config.h` (`OLED_SCREEN_CYCLE_MS`/`OLED_EVENT_DISPLAY_MS`/
+  `OLED_REFRESH_MIN_INTERVAL_MS`), `src/main.cpp` (3 lines: include,
+  `oled::init()`, `oled::tick()` — no event-callback changes). Zero
+  changes to `routing`/`predictor`/`anomaly`/`reliability`/`telemetry`
+  source. `oled_core` is host-tested (22/22 checks —
+  `test/test_oled_core.cpp`, see `docs/testing.md`); `oled.cpp` itself is
+  the Arduino-facing adapter half, unit-untestable by design (matches
+  every other adapter in this project — `transport`/`logger` have no host
+  tests either), reviewed by hand and validated by a real ESP32 compile:
+  both `ENABLE_UCB1` configs clean, 0 errors/0 warnings
+  (957,292/50,376 bytes at `ENABLE_UCB1=0`, the restored default;
+  959,436/50,776 at `=1`). Full existing 360-check host regression
+  (7 pre-existing suites) re-ran clean alongside the new 22 — 382/382
+  total. `git diff --stat -- gui-main/` empty before and after — no
+  `gui-main/` file touched. **Not run on real hardware** — code compiles
+  and the pure scheduling logic is host-proven, but no display has
+  actually shown a frame; see `docs/known-issues.md`.
+- **Phase/date:** OLED integration pass, 2026-08-18.
+
+## `rssiSlopeDbPerSec` documented as misleadingly named — same pattern as `endToEndLatencyMs`, not fixed the same way `endToEndLatencyMs` was found
+
+- **Decision:** Added a caveat to `gui-compatibility-matrix.md`'s `LINK_UPDATE`
+  table for `rssiSlopeDbPerSec` (fed directly from `predictor_core::NeighborLinkState::slope`
+  via `telemetry.cpp:208,232`'s `p.rssiSlopeDbPerSec = n.slope;`), documenting
+  that the underlying value is a least-squares fit against sample index, not
+  elapsed wall-clock time — `predictor_core.h`'s own field comment already
+  says "dBm per sample step," a deliberate Phase 2 simplification (samples
+  arrive on the fixed beacon cadence, not literal per-second timestamps — see
+  the existing "RSSI slope units" entry earlier in this file). No code
+  changed — the JSON key name itself is frozen by `gui-main/`'s telemetry
+  contract, so firmware cannot rename it unilaterally (same constraint that
+  produced the existing `endToEndLatencyMs` documentation-only entry this
+  mirrors).
+- **Reason:** Found during a full external-audit review pass (item "telemetry
+  slope units") — grepped the actual field name (`rssiSlopeDbPerSec`)
+  against what it's actually fed (index-based `.slope`) and found a real,
+  previously-undocumented unit mismatch that Phase 7.1's own "no-overclaiming
+  audit" (Finding 11) didn't catch, because that pass searched for
+  overclaiming *prose phrases* ("hardware validated," "OLED integration",
+  etc.), not a per-field wire-contract naming mismatch like this one. A
+  real gap in this project's own documentation discipline, now closed.
+- **Alternatives considered:** (a) Leave it — the value itself is real
+  telemetry, just imprecisely named by the frozen contract. (b) Ask the GUI
+  owner to rename the contract field.
+- **Why alternatives were rejected:** (a) is exactly the kind of silent
+  overclaiming this project's own standing rule (`CLAUDE.md`: "don't fake
+  what isn't real yet") exists to prevent — the value is real, but calling
+  it "per second" when it isn't is a real, avoidable mislabeling once
+  noticed. (b) is a legitimate future step but out of scope for a
+  documentation-only fix found during an audit — flagged, not
+  auto-escalated into a cross-team contract renegotiation.
+- **Impact:** One documentation row changed
+  (`docs/gui-compatibility-matrix.md`). Zero code changes — `.slope`'s real
+  value, and every consumer of it, is unchanged. No test/compile impact.
+- **Phase/date:** Full feature/bug audit pass, 2026-08-18.

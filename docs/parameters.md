@@ -194,6 +194,26 @@ Priority trigger (a single Serial `'p'`/`'P'` byte read on `NODE_A`) has no
 numeric parameter — see
 [decisions.md](decisions.md#priority-traffic-trigger-a-single-serial-character-pp-read-on-node_a-not-a-new-command-protocol).
 
+## OLED (local display — Nodes S and C only)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `OLED_SCREEN_CYCLE_MS` | `src/config.h` | `3000` ms | How long the auto-cycling display stays on each regular status screen. Not guide-specified — a starting/placeholder figure. |
+| `OLED_EVENT_DISPLAY_MS` | `src/config.h` | `4000` ms | How long a real event override (Node S: a direct neighbor's link health just flipped HEALTHY/UNHEALTHY) takes over the display before resuming the normal auto-cycle. Longer than `OLED_SCREEN_CYCLE_MS` so it's genuinely noticeable. |
+| `OLED_REFRESH_MIN_INTERVAL_MS` | `src/config.h` | `400` ms | Minimum real time between successive I2C pushes to the display, even with no screen change — the actual rate-limit. |
+
+Node S and Node C run genuinely different Adafruit drivers (a real,
+team-confirmed hardware fact, not a firmware choice) — see
+[decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot):
+
+| Node | Display | Controller | Library |
+|---|---|---|---|
+| S | 0.96" | SSD1306 | `Adafruit_SSD1306` |
+| C | 1.3" | SH1106 | `Adafruit_SH110X` (`Adafruit_SH1106G`) |
+
+Both use `OLED_I2C_ADDRESS` (`0x3C`, see "Hardware pins" above) and
+`PIN_OLED_SDA`/`PIN_OLED_SCL` (GPIO21/22).
+
 ## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
 Nothing remains in this category as of Phase 7 — the predictor's timing

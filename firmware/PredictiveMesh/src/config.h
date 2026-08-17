@@ -365,6 +365,44 @@
 #define APPLICATION_TX_INTERVAL_MS 2000
 
 // ============================================================
+// OLED (local display — Nodes S and C only, see core/node_id.h's
+// NodeInfo::hasOled). Two DIFFERENT physical controllers are wired (team-
+// confirmed, 2026-08-18): Node S = 0.96" SSD1306, Node C = 1.3" SH1106 —
+// see docs/decisions.md and docs/hardware-readiness.md for why this is a
+// real, confirmed deviation from implementation-guide.html §03's BOM
+// (which specifies two identical 0.96" SSD1306 units), not something
+// firmware invented or silently resolved. src/oled/oled.cpp selects the
+// matching driver per THIS_NODE_ID at runtime (never per-node #if — see
+// docs/decisions.md's existing note on why THIS_NODE_ID isn't visible to
+// the preprocessor).
+// ============================================================
+
+// How long the auto-cycling display stays on each regular status screen
+// before advancing to the next one. No value is given anywhere in
+// implementation-guide.html (it specifies WHAT the OLED shows, never a
+// refresh/cycle cadence) - a starting/placeholder figure, chosen to be
+// comfortably readable in a live demo without feeling static. Expected to
+// be re-tuned once real hardware is watched during a demo rehearsal. See
+// docs/decisions.md.
+#define OLED_SCREEN_CYCLE_MS 3000
+
+// How long a real, transition-only event (Node S: a direct neighbor's
+// predictor link health just flipped HEALTHY<->UNHEALTHY) temporarily
+// takes over the display before returning to the normal auto-cycle.
+// Longer than OLED_SCREEN_CYCLE_MS so a real event is genuinely noticeable
+// against the regular rotation, not lost in it.
+#define OLED_EVENT_DISPLAY_MS 4000
+
+// Minimum real time between successive I2C pushes to the display, even if
+// the shown screen hasn't changed - the actual rate-limiting mechanism
+// Part "OLED refresh is rate-limited" requires. Deliberately much coarser
+// than SENSOR_SAMPLE_INTERVAL_MS (150ms) or the ~10ms main loop cadence -
+// a human can't read a display refreshing faster than this anyway, and
+// every real I2C transaction this skips is time NOT spent blocking
+// app::loop() from getting back to routing::tick()/reliability::tick().
+#define OLED_REFRESH_MIN_INTERVAL_MS 400
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200
