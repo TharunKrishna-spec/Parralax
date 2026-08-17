@@ -39,7 +39,14 @@ void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
   }
 }
 
-void onEspNowSent(const uint8_t* mac, esp_now_send_status_t status) {
+// Arduino-ESP32 core 3.3.11 changed esp_now_send_cb_t's first parameter
+// from a raw `const uint8_t*` destination MAC to `const esp_now_send_info_t*`
+// (esp_now_send_info_t is a typedef of wifi_tx_info_t) - the destination MAC
+// is now tx_info->des_addr instead of being the callback's own argument.
+// Confirmed against the installed core's own esp_now.h/esp_wifi_types_generic.h,
+// not assumed. See docs/decisions.md.
+void onEspNowSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status) {
+  const uint8_t* mac = tx_info->des_addr;
   bool ok = (status == ESP_NOW_SEND_SUCCESS);
 
   char macStr[18];

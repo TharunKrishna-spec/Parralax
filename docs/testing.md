@@ -4,6 +4,161 @@ No physical hardware exists yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Phase 2 — predictor math + routing integration, both layers actually run
+
+Two independent, real validation passes, per the Phase 2 task spec's
+explicit requirement to perform both:
+
+### 1. Host tests (predictor mathematics/state machine + routing integration)
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/predictor/predictor_core.cpp test_predictor_core.cpp -o test_predictor_core
+(clean compile, zero warnings)
+$ ./test_predictor_core
+... (31 checks, see below)
+31/31 checks passed
+EXIT_CODE=0
+```
+
+All 12 required predictor scenarios pass, hand-verified against the actual
+formulas (see the comments in `test/test_predictor_core.cpp` for the
+worked arithmetic — e.g. the recovery scenario's exact PDR EWMA sequence,
+the least-squares slope for the "combined degradation" case):
+
+| # | Required scenario | Test |
+|---|---|---|
+| 1 | Stable RSSI → approximately-zero slope → healthy | `test_stable_rssi_is_healthy` |
+| 2 | Improving RSSI → positive slope | `test_improving_rssi_positive_slope` |
+| 3 | Degrading RSSI → EWMA follows trend, negative slope | `test_degrading_rssi_negative_slope` |
+| 4 | Noisy RSSI → EWMA smoother than raw | `test_noisy_rssi_ewma_smoother_than_raw` |
+| 5 | PDR degradation → PDR decreases | `test_pdr_degrades_on_failures` |
+| 6 | Stable good PDR → healthy evidence | `test_stable_good_pdr_is_healthy` |
+| 7 | Sudden silence → staleness fast-path activates | `test_staleness_fast_path` |
+| 8 | Combined RSSI+PDR degradation → lower link_score | `test_combined_degradation_lowers_score` |
+| 9 | Hysteresis: crosses T_LOW → unhealthy | `test_hysteresis_crosses_t_low_to_unhealthy` |
+| 10 | Score between thresholds → no flapping | `test_midband_score_does_not_flap` |
+| 11 | Recovery: crosses T_HIGH → healthy | `test_recovery_crosses_t_high_to_healthy` |
+| 12 | Single noisy bad sample → no immediate reroute (debounce) | `test_single_bad_sample_does_not_immediately_reroute` |
+
+Scenarios 13/14 (routing integration: priority ignores link_score;
+unhealthy B promotes C) live in `test/test_routing_core.cpp` instead,
+since that's the module the new health-aware `selectNextHop()` logic
+actually lives in:
+
+```
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/routing/routing_core.cpp test_routing_core.cpp -o test_routing_core
+(clean compile, zero warnings)
+$ ./test_routing_core
+... (21 checks: all 18 Phase 1 checks, unchanged and still passing, plus 2 new)
+ok:   PRIORITY routing still forces the direct A-S edge even when it's marked unhealthy
+ok:   sanity: with both healthy, NORMAL still prefers B (2 hops) over C (3 hops)
+ok:   NORMAL routing: unhealthy B allows the surviving C candidate (3 hops) to become preferred
+21/21 checks passed
+EXIT_CODE=0
+```
+
+| # | Required scenario | Test |
+|---|---|---|
+| 13 | Priority routing ignores poor link_score | `test_priority_ignores_unhealthy_link` |
+| 14 | Normal routing: unhealthy B promotes C | `test_normal_avoids_unhealthy_b` |
+
+**What this is not:** not a network simulator — no ESP-NOW, no real RSSI
+hardware, no simulated send outcomes. Every input is a hand-constructed
+number fed directly to a pure function; every expected output is worked by
+hand against the actual EWMA/least-squares/hysteresis formulas, not
+guessed. `predictor.cpp` (the Arduino-facing adapter) is untested by this
+harness, same caveat as `routing.cpp` in Phase 1 — reviewed by hand, not
+independently verified; see the ESP32 compile below for whether it at
+least *compiles* correctly.
+
+### 2. Real ESP32 compilation (whole sketch, Phase 0 + 1 + 2)
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all
+Sketch uses 890160 bytes (67%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 46064 bytes (14%) of dynamic memory, leaving 281616 bytes for local variables. Maximum is 327680 bytes.
+```
+
+Clean on the first attempt — 0 errors, 0 warnings (`--warnings all`
+explicit). No API-drift issues this time (Phase 2 doesn't call any new
+ESP-NOW APIs — `predictor_core`/`predictor.cpp` only consume the RSSI
+value and NodeId the transport/routing layers already extracted). Notably,
+`vsnprintf`'s `%.2f`/`%.3f` float format specifiers used in the new
+`[PREDICTOR]` log lines compiled and are expected to work correctly —
+Arduino-ESP32 core links a full newlib with float `printf` support by
+default (unlike AVR Arduino, which strips it), so this isn't the classic
+embedded "float printf silently does nothing" trap; still, actual Serial
+output has not been observed on real hardware (see below).
+
+**Explicit distinction, per the task's own requirement:**
+
+| Layer | Status |
+|---|---|
+| HOST TESTS (predictor math + routing integration) | **verified** — 31/31 + 21/21, see above |
+| ESP32 COMPILATION (whole sketch) | **verified** — clean, 0 warnings, 0 errors, `esp32:esp32` core 3.3.11 |
+| PHYSICAL HARDWARE | **not yet verified** — no boards exist; see "Hardware-dependent tests" below |
+
+## Real ESP32 toolchain compile — actually run (2026-08-17, post-Phase-1)
+
+The full Arduino sketch (Phase 0 + Phase 1, everything under
+`firmware/PredictiveMesh/`) was compiled for real against the actually
+installed toolchain:
+
+```
+$ arduino-cli version
+arduino-cli  Version: 1.5.2-rc.1
+
+$ arduino-cli core list
+esp32:esp32   3.3.11  esp32
+
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh
+```
+
+**First attempt failed** with a real compiler error (not a prediction):
+
+```
+espnow_transport.cpp:84:32: error: invalid conversion from
+'void (*)(const uint8_t*, esp_now_send_status_t)' to 'esp_now_send_cb_t'
+{aka 'void (*)(const wifi_tx_info_t*, esp_now_send_status_t)'} [-fpermissive]
+```
+
+This confirms the exact risk this file previously flagged as unverified
+("`esp_now_send_cb_t`'s exact signature ... hasn't changed across core
+2.x->3.x as far as documented ... hasn't been compiler-verified") — it
+turned out to have changed by core 3.3.11. Checked directly against the
+installed core's own headers (not guessed) and fixed; see
+[decisions.md](decisions.md#esp_now_send_cb_t-signature-adapted-for-arduino-esp32-core-3311)
+for the full before/after and header citations. `esp_now_recv_cb_t` and
+`esp_now_peer_info_t` (including `ifidx`) were checked against the same
+headers and found unchanged from what the code already assumed.
+
+**Second attempt, after the one-function fix, succeeded clean:**
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all
+Sketch uses 888168 bytes (67%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 45696 bytes (13%) of dynamic memory, leaving 281984 bytes for local variables. Maximum is 327680 bytes.
+```
+
+Zero warnings, even with `--warnings all` explicitly passed. Build
+artifacts (`.bin`/`.elf`/`.map`) land in
+`firmware/PredictiveMesh/build/esp32.esp32.esp32/` — gitignored, not
+committed.
+
+**What this validates:** the entire Phase 0 + Phase 1 firmware — including
+`routing.cpp`/`main.cpp`, the Arduino-facing halves the host g++ harness
+below cannot exercise — actually compiles against the real, installed
+ESP32 Arduino toolchain. **What this does not validate:** anything that
+only shows up at runtime on real silicon (RSSI values, timing, actual
+packet exchange) — see "Hardware-dependent tests" below, still all `NOT
+RUN — HARDWARE NOT AVAILABLE`.
+
+| Layer | Status |
+|---|---|
+| Host g++ unit tests (`routing_core` math) | **Verified** — 18/18, see below |
+| ESP32 `arduino-cli` compilation (whole sketch) | **Verified** — clean, 0 warnings, 0 errors |
+| Physical hardware | **Not yet verified** — no boards exist |
+
 ## Phase 1 — routing logic, actually compiled and run (host g++)
 
 Unlike Phase 0, Phase 1 has real algorithmic logic (`src/routing/routing_core.h/.cpp`)
@@ -96,49 +251,24 @@ install performed to run it.
   documented Arduino-ESP32 core 3.x / ESP-IDF >= 5.1 API surface referenced
   in implementation-guide.html §04's toolchain-constraint callout.
 
-**Real toolchain compile** — **still not performed, including for Phase 1's
-new files.** As of Phase 1 (2026-08-17), no `esp32:esp32` Arduino core is
-installed anywhere accessible in this environment — the only `arduino-cli`
-binary present is a leftover, never-completed install attempt in a
-temporary scratchpad directory, and `core list` against it reports "No
-platforms installed." (An ESP32 core install may be running separately on
-your end per your instruction — this file will be updated with the real
-result once you report `arduino-cli core list` showing `esp32:esp32` at
-3.x.) **Neither the Phase 0 firmware nor the new Phase 1 routing files
-(`routing.cpp`, `routing_core.cpp`) have been run through
-`arduino-cli compile` or the Arduino IDE.** Treat the static inspection
-above, plus the host-run `routing_core` unit tests, as "internally
-consistent by hand-review and pure-logic verification" — not as "confirmed
-to build for ESP32."
+**Real toolchain compile** — **now performed**, see "Real ESP32 toolchain
+compile — actually run" at the top of this file for the full result
+(one real compile error found and fixed, then a clean second build: 0
+warnings, 0 errors, against `esp32:esp32` core 3.3.11). This superseded
+everything below, which was written while the toolchain was still
+unavailable and is kept only as a historical record of what was
+*predicted* to be the risk before the real compile ran.
 
-### To actually verify compilation
+### Predictions made before the real compile (for the record)
 
-Once you have `arduino-cli` (or the Arduino IDE) with the ESP32 board
-package (`esp32:esp32`, core 3.x / ESP-IDF >= 5.1) installed:
-
-```sh
-arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh
-```
-
-or in Arduino IDE: open `firmware/PredictiveMesh/PredictiveMesh.ino`,
-select an ESP32 Dev Module board under the `esp32` core, and hit Verify.
-
-If it doesn't compile clean, the most likely failure points given what's
-new/unverified here are:
-- `esp_now_send_cb_t`'s exact signature on whatever specific core 3.x
-  patch version you have installed (it's written as
-  `void(*)(const uint8_t*, esp_now_send_status_t)` here — this one hasn't
-  changed across core 2.x->3.x as far as documented, only the receive
-  callback did, but hasn't been compiler-verified).
-- `esp_now_peer_info_t.ifidx` — set explicitly to `WIFI_IF_STA` in
-  `transport::addPeer()`; confirm this field/enum name still matches your
-  installed core version.
-- `#pragma pack` / `offsetof` interaction — should be fine on GCC/Xtensa,
-  but unverified without an actual build.
-
-Please report back what actually happens (clean build, or the exact
-error) so `docs/known-issues.md` and this file can be updated with a real
-result instead of a prediction.
+The predictions below turned out to be **one hit, two clean**:
+- `esp_now_send_cb_t`'s exact signature — **this was the real failure.**
+  Predicted as "hasn't changed across core 2.x->3.x as far as documented,
+  only the receive callback did" — wrong for core 3.3.11 specifically; see
+  [decisions.md](decisions.md#esp_now_send_cb_t-signature-adapted-for-arduino-esp32-core-3311).
+- `esp_now_peer_info_t.ifidx` — compiled clean, no changes needed.
+- `#pragma pack` / `offsetof` interaction — compiled clean, no changes
+  needed.
 
 ## Hardware-dependent tests
 
@@ -158,9 +288,13 @@ mark any of these as passed until they've actually run on real hardware.
 
 ## What's still deliberately untested (later-phase stubs)
 
-Anything belonging to a stub module (`predictor::linkScore()`,
-`anomaly::evaluate()`, `reliability::onSendResult()`, `telemetry::init()`)
-has no meaningful test beyond "does it compile and return its documented
-safe default" — there's no algorithm behind it yet to verify.
+Anything belonging to a stub module (`anomaly::evaluate()`,
+`reliability::onSendResult()`, `telemetry::init()`) has no meaningful test
+beyond "does it compile and return its documented safe default" — there's
+no algorithm behind it yet to verify.
 `routing::selectNextHop()`/`getNextHop()` are no longer in this category as
-of Phase 1 — see the routing_core test suite above.
+of Phase 1, and `predictor::linkScore()`/`isUnhealthy()` are no longer in
+this category as of Phase 2 — see the routing_core and predictor_core test
+suites above. The one real gap within predictor is the PDR evidence
+stream's live wiring (not the math) — see
+[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2).

@@ -60,6 +60,34 @@ out on most DevKit boards anyway.
 | `ROUTING_ENTRY_TIMEOUT_MS` | `src/config.h` | `3000` ms | Neighbor/route staleness cutoff, shared by both tables since both are refreshed by the same beacon. 3x the beacon interval — tolerates a couple of missed beacons before declaring a link down, matching the "3-5x reaction time" convention used for the predictor's timeout below. |
 | `routing_core::MAX_HOP_COUNT` | `src/routing/routing_core.h` | `15` | RIP-style "unreachable" sentinel. Any computed distance at or above this is treated as infinity, not a real distance — bounds a corrupt/absurd advertisement from being stored as a plausible finite value. With 5 real nodes, any genuine route is at most 4 hops, so 15 is generous headroom, not a tuned value. |
 
+## Predictor (Phase 2)
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `PREDICTOR_RSSI_EWMA_ALPHA` | `src/config.h` | `0.3` | implementation-guide.html §5.1's exact stated value ("alpha ~ 0.3"). Higher = more reactive, lower = smoother. |
+| `PREDICTOR_SLOPE_WINDOW` | `src/config.h` | `8` samples | Least-squares slope fit window. The guide's own reference (15-20 samples, ~2-4s) assumes a 100-200ms heartbeat; Phase 2 reuses the existing ~1s beacon as its RSSI sample source instead of adding a faster wire message, so the sample count is scaled down to keep the real-world reaction window in the same single-digit-second range. See [decisions.md](decisions.md#rssi-sample-cadence-reuses-the-existing-phase-1-beacon-not-a-new-fast-heartbeat). |
+| `PREDICTOR_SLOPE_REF_DBM_PER_SAMPLE` | `src/config.h` | `1.5` dBm/sample | From the guide's `degrade_term = clamp(-slope/SLOPE_REF, 0, 1)` formula. The guide names `SLOPE_REF` but gives no numeric value — this is a starting/placeholder figure, expected to be re-tuned once real hardware attenuation testing (the guide's "Faraday bag on Node B" demo, §06) is possible. |
+| `PREDICTOR_LINK_SCORE_W1` / `W2` | `src/config.h` | `0.5` / `0.5` | implementation-guide.html §5.1's exact stated fusion weights ("w1 = w2 = 0.5 to start"). |
+| `PREDICTOR_PDR_EWMA_ALPHA` | `src/config.h` | `0.1` | Derived from the guide's stated 20-frame PDR window via the standard EWMA/SMA equivalence `alpha = 2/(N+1)` = `2/21 ≈ 0.0952`, rounded to 0.1. |
+| `PREDICTOR_HYSTERESIS_T_LOW` / `T_HIGH` | `src/config.h` | `0.5` / `0.7` | Two-threshold hysteresis on `link_score` `[0,1]` (higher = healthier), replacing the guide's single `THRESHOLD` per the Phase 2 task spec's explicit requirement. `T_LOW` plays the role the guide calls `THRESHOLD`; `T_HIGH` is new. |
+| `PREDICTOR_CONSECUTIVE_BAD_COUNT` / `GOOD_COUNT` | `src/config.h` | `3` / `3` | Consecutive-evaluation debounce, per the guide's own pseudocode ("reroute if below threshold for 3 consecutive evaluations"). Applied symmetrically to the recovery direction since the guide gives no separate figure for it. |
+| `PREDICTOR_STALENESS_TIMEOUT_MS` | `src/config.h` | `2000` ms | Independent staleness fast-path timeout — deliberately faster than `ROUTING_ENTRY_TIMEOUT_MS` (3000ms) so the predictor's silence-detection can flag a dying link before routing's own hard fallback expires it. 2x the beacon interval (vs. routing's 3x). See [decisions.md](decisions.md#independent-staleness-fast-path-deliberately-bypasses-the-debounce). |
+
+**How the three timeouts relate** (`ROUTING_HELLO_INTERVAL_MS` = 1000ms is
+the shared cause; the other two are effects, racing each other on purpose):
+
+```
+0ms                 1000ms               2000ms               3000ms
+|--- beacon interval ---|                    |                    |
+|                        |--- predictor staleness (2x) fires here -->|
+|                                             |--- routing hard-expiry (3x) fires here -->|
+```
+
+The predictor's fast path is meant to win this race — it's the "proactive"
+half of implementation-guide.html's own framing ("reroutes traffic before
+a heartbeat timeout... heartbeat timeout stays armed regardless, as a hard
+fallback").
+
 ## Serial
 
 | Parameter | Location | Value | Notes |
@@ -78,17 +106,15 @@ exists, and
 [decisions.md](decisions.md#broadcast-peer-as-the-phase-0-espnow-bootstrap)
 for why a broadcast peer is registered in the meantime.
 
-## Timing parameters — documented in implementation-guide.html, not yet wired into code
+## Timing/threshold parameters — documented in implementation-guide.html, not yet wired into code
 
-These belong to the predictor layer (§5.1), which isn't implemented in
-Phase 0. Recorded here so they're not lost before that phase starts:
+These belong to the anomaly layer (§5.2), which isn't implemented as of
+Phase 2. Recorded here so they're not lost before that phase starts. (The
+predictor's own timing parameters — heartbeat/sample interval, slope
+window, PDR window, RSSI EWMA alpha — are wired for real as of Phase 2; see
+the "Predictor (Phase 2)" table above instead of this one.)
 
 | Parameter | Starting value | Why |
 |---|---|---|
-| Heartbeat interval | 100–200 ms | Gives the slope estimator resolution. |
-| Slope window W | 15–20 samples (~2–4 s) | Enough to see a trend without lagging the event. |
-| PDR window | 20 frames | Matches ~2–4 s at the heartbeat rate above. |
-| Heartbeat timeout | 3–5x predictor reaction (~1–2 s) | Safety-net fallback; proactive reroute should normally win. |
-| RSSI EWMA alpha | ~0.3 | Higher = more reactive, lower = smoother. |
 | MAD-Z threshold | 3.5 | Iglewicz & Hoaglin modified Z-score threshold. |
 | Flatline STUCK_N | ~50 samples | Consecutive unchanged samples before flagging STUCK. |

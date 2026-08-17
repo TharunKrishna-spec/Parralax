@@ -61,6 +61,79 @@
 #define ROUTING_ENTRY_TIMEOUT_MS 3000
 
 // ============================================================
+// PREDICTOR (Phase 2)
+// ============================================================
+// RSSI EWMA smoothing factor. Higher = more reactive to each new sample,
+// lower = smoother/slower. Per implementation-guide.html §5.1 ("alpha ~
+// 0.3") - used exactly as given, not re-derived.
+#define PREDICTOR_RSSI_EWMA_ALPHA 0.3f
+
+// Number of EWMA-smoothed RSSI samples the least-squares slope is fit
+// over. implementation-guide.html's own reference value (15-20 samples,
+// ~2-4s) assumes a 100-200ms heartbeat. Phase 2 deliberately reuses the
+// existing ~1s distance-vector beacon (ROUTING_HELLO_INTERVAL_MS) as its
+// RSSI sample source instead of adding a second, faster wire message (Part
+// 1 of the Phase 2 spec: "do not duplicate the radio reception
+// mechanism") - so the window is scaled down to keep the real-world
+// reaction time in the same single-digit-second range the guide intends,
+// rather than literally reusing "15-20" samples at ~1 Hz (15-20 seconds -
+// far slower than the guide's own intent). See docs/decisions.md.
+#define PREDICTOR_SLOPE_WINDOW 8
+
+// SLOPE_REF from implementation-guide.html's degrade_term formula
+// (degrade_term = clamp(-slope/SLOPE_REF, 0, 1)). The guide names this
+// constant but gives no starting numeric value. Chosen here so a
+// sustained ~1.5 dBm-per-sample downward trend fully saturates
+// degrade_term to 1.0 - a starting/placeholder figure, expected to be
+// re-tuned once real hardware attenuation testing (the guide's own
+// "Faraday bag on Node B" demo, §06) is possible. See docs/decisions.md.
+#define PREDICTOR_SLOPE_REF_DBM_PER_SAMPLE 1.5f
+
+// link_score fusion weights - per implementation-guide.html §5.1 exactly
+// ("w1 = w2 = 0.5 to start").
+#define PREDICTOR_LINK_SCORE_W1 0.5f
+#define PREDICTOR_LINK_SCORE_W2 0.5f
+
+// PDR EWMA smoothing factor, derived (not guessed) from
+// implementation-guide.html's stated 20-frame PDR window using the
+// standard EWMA/simple-moving-average equivalence alpha = 2/(N+1):
+// 2/(20+1) ~= 0.0952, rounded to 0.1 for a clean, documented constant. See
+// docs/decisions.md.
+#define PREDICTOR_PDR_EWMA_ALPHA 0.1f
+
+// Hysteresis thresholds on link_score [0,1] (higher = healthier). A single
+// threshold, as implementation-guide.html's own pseudocode uses, would let
+// a score oscillating right around the cutoff flap the routing decision
+// back and forth - the Phase 2 task spec explicitly requires two
+// thresholds instead. T_LOW plays the role the guide calls THRESHOLD;
+// T_HIGH is new, requiring the score to clear a meaningfully higher bar
+// before a link is trusted as healthy again. See docs/decisions.md.
+#define PREDICTOR_HYSTERESIS_T_LOW 0.5f
+#define PREDICTOR_HYSTERESIS_T_HIGH 0.7f
+
+// Consecutive-evaluation debounce, per implementation-guide.html §5.1's own
+// pseudocode ("reroute if below threshold for 3 consecutive evaluations").
+// Applied symmetrically to the recovery direction (T_HIGH) too - the guide
+// only specifies the degrade direction, but nothing suggests recovering
+// should be easier to trigger than degrading was to detect, so the same
+// count is reused rather than inventing an unstated asymmetric value.
+#define PREDICTOR_CONSECUTIVE_BAD_COUNT 3
+#define PREDICTOR_CONSECUTIVE_GOOD_COUNT 3
+
+// Independent staleness fast-path timeout - deliberately faster than
+// ROUTING_ENTRY_TIMEOUT_MS (3000ms, 3x the beacon interval) so the
+// predictor's silence-detection can flag a dying link BEFORE routing's own
+// hard fallback expires it, matching implementation-guide.html's stated
+// intent ("heartbeat timeout stays armed regardless, as a hard fallback" -
+// implying the proactive path should normally act first). 2x the beacon
+// interval - one less than routing's 3x - is the smallest change that
+// keeps the same "tolerate one dropped beacon, not two" derivation while
+// staying strictly faster than ROUTING_ENTRY_TIMEOUT_MS. See
+// docs/decisions.md and docs/parameters.md for the full relationship
+// between HELLO interval / route timeout / predictor staleness timeout.
+#define PREDICTOR_STALENESS_TIMEOUT_MS 2000
+
+// ============================================================
 // SERIAL
 // ============================================================
 #define SERIAL_BAUD_RATE 115200

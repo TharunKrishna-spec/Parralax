@@ -3,6 +3,7 @@
 #include "../config.h"
 #include "../core/logger.h"
 #include "../core/message_types.h"
+#include "../predictor/predictor.h"
 #include "../transport/espnow_transport.h"
 #include <Arduino.h>
 
@@ -138,8 +139,19 @@ void tick() {
 }
 
 NodeId getNextHop(NodeId destination, bool priority) {
+  // Phase 2: NORMAL selection additionally consults predictor-observed
+  // link health for each candidate's via-neighbor (see
+  // docs/decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule).
+  // PRIORITY selection ignores this array entirely inside
+  // routing_core::selectNextHop, so building it unconditionally here is
+  // harmless (and avoids a branch that would only save a few bytes).
+  bool unhealthy[NODE_ID_COUNT];
+  for (uint8_t n = 0; n < NODE_ID_COUNT; n++) {
+    unhealthy[n] = predictor::isUnhealthy(static_cast<NodeId>(n));
+  }
+
   uint8_t hop = 0;
-  NodeId next = routing_core::selectNextHop(g_state, destination, priority, &hop);
+  NodeId next = routing_core::selectNextHop(g_state, destination, priority, &hop, unhealthy);
 
   logger::info("[ROUTE] dst=%s next=%s hops=%u priority=%d",
                nodeName(destination),

@@ -101,15 +101,28 @@ uint8_t buildAdvertisement(const RoutingState& state, RouteAdEntry* out, uint8_t
 bool isPriorityOnlyEdge(NodeId a, NodeId b);
 
 // Selects the next hop for `destination`.
-// priority == false (NORMAL): minimum hop-count candidate, excluding any
-//   candidate reached via a priority-only edge.
+// priority == false (NORMAL): prefers the minimum hop-count candidate
+//   among those NOT reached via a priority-only edge AND not flagged
+//   unhealthy in `neighborUnhealthy` (Phase 2 — see docs/decisions.md for
+//   why this sits alongside, not instead of, the priority-only-edge
+//   exclusion). If every remaining eligible candidate is unhealthy, falls
+//   back to the minimum hop-count one anyway — a degraded link is still
+//   better than no link, so link health gates *preference*, not
+//   *validity*; only Phase 1's staleness/invalidity mechanism controls
+//   whether a candidate exists at all.
 // priority == true (PRIORITY): minimum hop-count candidate over ALL
-//   candidates — will prefer a priority-only edge whenever it's shorter.
+//   candidates, completely ignoring `neighborUnhealthy` — will prefer a
+//   priority-only edge whenever it's shorter, regardless of link health.
+// `neighborUnhealthy`, if non-null, is a NODE_ID_COUNT-length array
+// indexed by via-neighbor NodeId; a Phase-1-only caller (or a Phase 1
+// regression test) can omit it entirely (nullptr, the default) and get
+// exactly Phase 1's original behavior back.
 // Ties break toward the lowest NodeId value (deterministic, arbitrary,
 // documented — not a quality judgment).
 // Returns NODE_ID_UNKNOWN if destination is out of range, is this node
 // itself, or has no valid candidate. Never returns `state.self`.
 NodeId selectNextHop(const RoutingState& state, NodeId destination, bool priority,
-                      uint8_t* outHopCount = nullptr);
+                      uint8_t* outHopCount = nullptr,
+                      const bool* neighborUnhealthy = nullptr);
 
 }  // namespace routing_core

@@ -31,6 +31,7 @@ void onTransportRx(const transport::RxEvent& evt) {
   memcpy(&pkt, evt.data, copyLen);
 
   routing::onPacketReceived(pkt, evt.rssi);
+  predictor::onPacketReceived(pkt, evt.rssi);
 }
 
 void onTransportTx(const transport::TxEvent& evt) {
@@ -50,6 +51,18 @@ void onRouteEvent(const routing::RouteEvent& evt) {
                 nodeName(evt.destination),
                 evt.next_hop == NODE_ID_UNKNOWN ? "NONE" : nodeName(evt.next_hop),
                 static_cast<unsigned>(evt.hop_count), evt.priority ? 1 : 0);
+}
+
+// Phase 2's link-health event stream - logged for now, same pattern as
+// onRouteEvent above. A later phase (anomaly/telemetry) can subscribe via
+// predictor::setEventCallback() instead of adding a new hook here.
+void onLinkEvent(const predictor::LinkEvent& evt) {
+  const char* typeStr =
+      evt.type == predictor::LinkEventType::LINK_SCORE_UPDATED ? "SCORE_UPDATED"
+      : evt.type == predictor::LinkEventType::LINK_DEGRADING   ? "DEGRADING"
+      : evt.type == predictor::LinkEventType::LINK_UNHEALTHY   ? "UNHEALTHY"
+                                                                 : "RECOVERED";
+  logger::debug("[PREDICTOR-EVENT] %s neighbor=%s score=%.2f", typeStr, nodeName(evt.neighbor), evt.score);
 }
 
 // Registers ESP-NOW peers for this node's direct topology neighbors (see
@@ -78,7 +91,7 @@ namespace app {
 void setup() {
   logger::begin(SERIAL_BAUD_RATE);
   logger::info("========================================");
-  logger::info("Predictive Self-Healing IoT Mesh - Phase 1 firmware");
+  logger::info("Predictive Self-Healing IoT Mesh - Phase 2 firmware");
   logger::info("Node %s initialized (role=%s)", thisNode().name, roleName(thisNode().role));
 
   transport::Status status = transport::begin(onTransportRx, onTransportTx);
@@ -101,11 +114,12 @@ void setup() {
   routing::init();
   routing::setEventCallback(onRouteEvent);
   predictor::init();
+  predictor::setEventCallback(onLinkEvent);
   anomaly::init();
   reliability::init();
   telemetry::init();
 
-  logger::info("Phase 1 firmware ready - entering main loop");
+  logger::info("Phase 2 firmware ready - entering main loop");
 }
 
 void loop() {
@@ -117,6 +131,7 @@ void loop() {
   }
 
   routing::tick();
+  predictor::tick();
 
   delay(10);
 }

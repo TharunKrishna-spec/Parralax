@@ -125,9 +125,11 @@ someone else's packet yet), UCB1, dashboard/WebSerial.
   covering all 10 required test scenarios.
 - Static review of `routing.cpp`/`main.cpp` against implementation-guide.html
   and Phase 1's "DO NOT" list.
-- **Real `arduino-cli compile` still not performed** — no `esp32:esp32`
-  core installed anywhere accessible in this environment as of this phase.
-  See [testing.md](testing.md) and [known-issues.md](known-issues.md).
+- **Real `arduino-cli compile` performed post-Phase-1 (2026-08-17)** against
+  the actually installed `esp32:esp32` core 3.3.11: found and fixed one
+  real API-drift error (`esp_now_send_cb_t`'s signature), then a clean
+  build — 0 errors, 0 warnings. See [testing.md](testing.md) and
+  [decisions.md](decisions.md#esp_now_send_cb_t-signature-adapted-for-arduino-esp32-core-3311).
 - No hardware-dependent validation — see
   [known-issues.md](known-issues.md#phase-1-routing--not-yet-run-on-hardware).
 
@@ -141,3 +143,91 @@ the fused link predictor: RSSI EWMA smoothing, least-squares slope over
 window W, PDR sliding window, and the fused `link_score` — which is also
 when the priority-only-edge special case in `routing_core` becomes
 eligible to be replaced by real link-quality-aware selection.
+
+---
+
+## Phase 2 — Predictive link health (RSSI EWMA/slope + PDR + staleness fusion)
+**Date:** 2026-08-17
+**Status:** Complete, awaiting explicit go-ahead for Phase 3.
+
+### Objective
+Implement the fused link-degradation predictor — per
+implementation-guide.html §5.1 and §06 (Hours 6-12) — combining RSSI EWMA
+smoothing + least-squares slope, PDR, and an independent staleness
+fast-path into a single `link_score`, gated by a two-threshold hysteresis
+state machine, and integrate it into Phase 1's routing layer without
+destroying its candidate-route architecture. Explicitly excluded: anomaly
+detection (MAD-Z, flatline), the reliability layer (ACK/retransmit/
+dup-filter), UCB1, the dashboard, and any Phase 3 work.
+
+### What was built
+- `src/predictor/predictor_core.h/.cpp` — the real algorithm, Arduino-free
+  (mirrors `routing_core`'s Phase 1 split): per-neighbor RSSI EWMA + ring
+  buffer, least-squares slope, PDR EWMA, fused `link_score`, and a
+  two-threshold (`T_LOW`/`T_HIGH`) hysteresis state machine combined with
+  implementation-guide.html's own 3-consecutive-evaluation debounce, plus
+  an independent staleness fast-path that bypasses the debounce entirely.
+- `src/predictor/predictor.h/.cpp` — the Arduino-facing adapter: feeds
+  real RSSI from the same receive dispatch point routing already uses,
+  logs the evidence behind every score (`[PREDICTOR] neighbor=... rssi_ewma=...
+  slope=... pdr=... score=... health=...`), and exposes
+  `LINK_SCORE_UPDATED`/`LINK_DEGRADING`/`LINK_UNHEALTHY`/`LINK_RECOVERED`
+  events via `predictor::setEventCallback()`.
+- `src/routing/routing_core.h/.cpp` extended (not replaced): `selectNextHop()`
+  gained a backward-compatible, default-`nullptr` `neighborUnhealthy`
+  parameter. NORMAL selection now prefers healthy candidates over
+  unhealthy ones (falling back to the best available if all are
+  unhealthy); PRIORITY selection ignores it unconditionally. All 18 Phase
+  1 tests pass unmodified.
+- `src/routing/routing.cpp`'s `getNextHop()` now builds that health mask
+  from `predictor::isUnhealthy()` before calling `routing_core::selectNextHop()`.
+- `src/config.h`: a full `PREDICTOR_*` constant block (EWMA alphas,
+  SLOPE_REF, fusion weights, hysteresis thresholds, debounce counts,
+  staleness timeout) — see [parameters.md](parameters.md) and
+  [decisions.md](decisions.md) for every value's derivation.
+- `firmware/PredictiveMesh/test/test_predictor_core.cpp` (new) — 31/31
+  checks, covering all 12 required predictor scenarios.
+- `firmware/PredictiveMesh/test/test_routing_core.cpp` — 2 new checks
+  (scenarios 13-14: priority ignores link health; unhealthy B promotes C),
+  alongside the 18 unmodified Phase 1 checks — 21/21 total.
+- One real, documented design call: the Phase 1 `isPriorityOnlyEdge`
+  exclusion is **kept, unchanged** — link health integrates *alongside* it,
+  not as a replacement — because no real hardware exists yet to make
+  `link_score` organically distinguish the A-S edge from A-B. See
+  [decisions.md](decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule).
+- `MeshPacket`/the wire format are unchanged — `link_score` is a purely
+  local quantity, never advertised over the air in Phase 2. See
+  [decisions.md](decisions.md#no-meshpacketwire-format-changes-needed-for-phase-2).
+
+### What was explicitly NOT built (by design)
+Anomaly detection (MAD Z-score, flatline), the reliability layer (ACK,
+retransmit, duplicate filtering), UCB1, dashboard/WebSerial, live PDR
+wiring (the math/API exist and are tested; `predictor::onSendResult()` has
+no live caller yet — see
+[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2)),
+and any change to `implementation-guide.html`'s topology/hardware pins/
+transport choice.
+
+### Validation performed
+- `firmware/PredictiveMesh/test/test_predictor_core.cpp`: real,
+  host-compiled (g++ 15.2.0 / MinGW-W64), actually executed — 31/31 checks
+  passed, covering all 12 required predictor scenarios.
+- `firmware/PredictiveMesh/test/test_routing_core.cpp`: re-run after
+  extension — 21/21 checks passed (18 original + 2 new).
+- **Real `arduino-cli compile` performed** against the full Phase 0+1+2
+  sketch, `esp32:esp32` core 3.3.11 — clean on the first attempt, 0
+  errors, 0 warnings (`--warnings all`). See [testing.md](testing.md).
+- No hardware-dependent validation — see
+  [known-issues.md](known-issues.md#phase-2-predictor--not-yet-run-on-hardware).
+
+### Git
+No commits were made this phase. Working tree left uncommitted for the
+user to review.
+
+### Next phase (not started, awaiting explicit go-ahead)
+Per implementation-guide.html §06 (Hours 12+), later phases would add the
+anomaly engine (§5.2: MAD Z-score + flatline detector), the reliability
+layer (§5.4: hop-by-hop ACK, retransmit, duplicate filtering, and actual
+multi-hop `MSG_DATA` relaying — which is also the natural point to wire
+`predictor::onSendResult()` to real unicast delivery outcomes), and
+eventually the reporting/dashboard layer.

@@ -62,15 +62,20 @@ the broadcast peer (see
 
 ## Toolchain
 
-- ESP32 Arduino core version actually used for the compile check is
-  recorded in `docs/testing.md` once the compile check runs — still not
-  performed as of Phase 1 (no `esp32:esp32` core installed anywhere
-  accessible in this environment as of 2026-08-17; see `docs/testing.md`).
-  The firmware requires core 3.x (ESP-IDF >= 5.1) specifically for the
+- **Resolved 2026-08-17 (post-Phase-1):** `esp32:esp32` core 3.3.11 is now
+  installed and verified (`arduino-cli` 1.5.2-rc.1). A real
+  `arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh`
+  was run against the full Phase 0 + Phase 1 firmware — one real API-drift
+  error found (`esp_now_send_cb_t`'s signature; see
+  [decisions.md](decisions.md#esp_now_send_cb_t-signature-adapted-for-arduino-esp32-core-3311)),
+  fixed, then a clean rebuild: 0 errors, 0 warnings (`--warnings all`).
+  Full detail and the real compiler output in `docs/testing.md`. The
+  firmware requires core 3.x (ESP-IDF >= 5.1) specifically for the
   `esp_now_recv_info_t*` receive callback signature — see
-  implementation-guide.html §04's toolchain-constraint callout. If a
-  contributor's local Arduino IDE has an older core installed, RSSI
-  extraction will not compile as written.
+  implementation-guide.html §04's toolchain-constraint callout; that part
+  of the assumption held unchanged on 3.3.11. If a contributor's local
+  Arduino IDE has an older core installed, RSSI extraction will not
+  compile as written.
 
 ## `implementation-guide.html` location doesn't match `CLAUDE.md`
 
@@ -100,3 +105,39 @@ implementation-guide.html. Neither is a substitute for the real thing:
 
 All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
 this file.
+
+## Phase 2 predictor — not yet run on hardware
+
+Everything in `src/predictor/` (RSSI EWMA/slope, PDR EWMA, fused
+`link_score`, two-threshold hysteresis, staleness fast-path) is verified
+two ways: a host-compiled, actually-executed unit test suite
+(`firmware/PredictiveMesh/test/test_predictor_core.cpp` — 31/31 checks,
+see `docs/testing.md`) and a real `arduino-cli` compile of the whole
+sketch. Neither is a substitute for the real thing:
+
+- [ ] Real RSSI on a genuinely degrading link (e.g. the guide's own
+      "Faraday bag on Node B" test) actually produces a visibly falling
+      `link_score` on the Serial monitor
+- [ ] `PREDICTOR_SLOPE_REF_DBM_PER_SAMPLE` (currently a placeholder, 1.5)
+      is tuned against real attenuation data instead of a guess
+- [ ] Real NORMAL traffic visibly reroutes from B to C when B's real link
+      degrades, not just in the host test's hand-constructed inputs
+- [ ] The staleness fast-path's 2000ms timeout is validated against real
+      beacon jitter/loss rates, not just a fast-forwarded `now` value
+
+All `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top of
+this file.
+
+## PDR evidence stream: real math, not yet fed by live data
+
+Tracked in full in
+[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2) —
+summarized here per this file's own checklist convention. `predictor::onSendResult()`
+is implemented and tested but has no live caller: every send this firmware
+performs is a broadcast `MSG_HEARTBEAT` beacon (no real per-neighbor
+delivery signal — ESP-NOW broadcast isn't MAC-layer-ACKed), and even a real
+unicast send's `TxEvent` identifies a MAC, not a `NodeId`, which can't be
+safely reverse-mapped while `NODE_TABLE`'s MACs remain the Phase 0
+all-zero placeholder (see "Peer MAC addresses are placeholders" above).
+Revisit once both (a) real unicast traffic exists (reliability layer,
+§5.4) and (b) real MACs are populated post-hardware.

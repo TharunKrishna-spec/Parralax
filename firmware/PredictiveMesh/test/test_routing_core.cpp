@@ -221,6 +221,48 @@ void test_route_associated_with_neighbor() {
   check(viaCOnly == NODE_C && hop == 3, "C's candidate (via C, 3 hops) was stored independently, keyed by neighbor C");
 }
 
+// ---- 13. Priority routing ignores link health (Phase 2) ----
+void test_priority_ignores_unhealthy_link() {
+  RoutingState a;
+  init(a, NODE_A);
+
+  RouteAdEntry fromB[] = { { NODE_B, 0 }, { NODE_S, 1 } };
+  applyRouteAdvertisement(a, NODE_B, fromB, 2, 1000);
+  RouteAdEntry fromS[] = { { NODE_S, 0 } };
+  applyRouteAdvertisement(a, NODE_S, fromS, 1, 1000);
+
+  bool unhealthy[NODE_ID_COUNT] = { false, false, false, false, false };
+  unhealthy[NODE_S] = true;  // mark the direct A-S link unhealthy
+
+  uint8_t hop = 0;
+  NodeId via = selectNextHop(a, NODE_S, /*priority=*/true, &hop, unhealthy);
+  check(via == NODE_S && hop == 1,
+        "PRIORITY routing still forces the direct A-S edge even when it's marked unhealthy");
+}
+
+// ---- 14. Normal routing routes around an unhealthy B toward the surviving C candidate (Phase 2) ----
+void test_normal_avoids_unhealthy_b() {
+  RoutingState a;
+  init(a, NODE_A);
+
+  RouteAdEntry fromB[] = { { NODE_B, 0 }, { NODE_S, 1 } };
+  applyRouteAdvertisement(a, NODE_B, fromB, 2, 1000);
+  RouteAdEntry fromC[] = { { NODE_C, 0 }, { NODE_S, 2 } };
+  applyRouteAdvertisement(a, NODE_C, fromC, 2, 1000);
+
+  uint8_t hopHealthy = 0;
+  check(selectNextHop(a, NODE_S, false, &hopHealthy) == NODE_B,
+        "sanity: with both healthy, NORMAL still prefers B (2 hops) over C (3 hops)");
+
+  bool unhealthy[NODE_ID_COUNT] = { false, false, false, false, false };
+  unhealthy[NODE_B] = true;
+
+  uint8_t hop = 0;
+  NodeId via = selectNextHop(a, NODE_S, /*priority=*/false, &hop, unhealthy);
+  check(via == NODE_C && hop == 3,
+        "NORMAL routing: unhealthy B allows the surviving C candidate (3 hops) to become preferred");
+}
+
 }  // namespace
 
 int main() {
@@ -234,6 +276,8 @@ int main() {
   test_cannot_select_self();
   test_invalid_advertisement_rejected();
   test_route_associated_with_neighbor();
+  test_priority_ignores_unhealthy_link();
+  test_normal_avoids_unhealthy_b();
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);
   return g_failures == 0 ? 0 : 1;

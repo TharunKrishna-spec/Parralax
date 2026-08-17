@@ -91,12 +91,18 @@ bool isPriorityOnlyEdge(NodeId a, NodeId b) {
 }
 
 NodeId selectNextHop(const RoutingState& state, NodeId destination, bool priority,
-                      uint8_t* outHopCount) {
+                      uint8_t* outHopCount, const bool* neighborUnhealthy) {
   if (outHopCount) *outHopCount = 0;
   if (destination >= NODE_ID_COUNT || destination == state.self) return NODE_ID_UNKNOWN;
 
-  NodeId best = NODE_ID_UNKNOWN;
-  uint8_t bestHop = MAX_HOP_COUNT;
+  // Two running bests: the preferred (healthy-or-unknown) candidate, and
+  // the best candidate regardless of health, used as a fallback so an
+  // all-unhealthy destination still resolves to its best surviving route
+  // rather than NODE_ID_UNKNOWN — see routing_core.h.
+  NodeId bestHealthy = NODE_ID_UNKNOWN;
+  uint8_t bestHealthyHop = MAX_HOP_COUNT;
+  NodeId bestAny = NODE_ID_UNKNOWN;
+  uint8_t bestAnyHop = MAX_HOP_COUNT;
 
   for (uint8_t via = 0; via < NODE_ID_COUNT; via++) {
     const RouteCandidate& cand = state.candidates[destination][via];
@@ -106,11 +112,20 @@ NodeId selectNextHop(const RoutingState& state, NodeId destination, bool priorit
     // Ascending iteration order means the first strict improvement found
     // is always the lowest-NodeId candidate at that hop count, so this
     // also implements the documented tie-break with no extra branch.
-    if (cand.hop_count < bestHop) {
-      bestHop = cand.hop_count;
-      best = static_cast<NodeId>(via);
+    if (cand.hop_count < bestAnyHop) {
+      bestAnyHop = cand.hop_count;
+      bestAny = static_cast<NodeId>(via);
+    }
+
+    bool unhealthy = !priority && neighborUnhealthy != nullptr && neighborUnhealthy[via];
+    if (!unhealthy && cand.hop_count < bestHealthyHop) {
+      bestHealthyHop = cand.hop_count;
+      bestHealthy = static_cast<NodeId>(via);
     }
   }
+
+  NodeId best = (bestHealthy != NODE_ID_UNKNOWN) ? bestHealthy : bestAny;
+  uint8_t bestHop = (bestHealthy != NODE_ID_UNKNOWN) ? bestHealthyHop : bestAnyHop;
 
   if (outHopCount) *outHopCount = (best == NODE_ID_UNKNOWN) ? 0 : bestHop;
   return best;

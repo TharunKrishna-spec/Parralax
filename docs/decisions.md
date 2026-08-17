@@ -428,3 +428,368 @@ entries go at the bottom. Format:
   rather than left as an open question — deferred specifically to whichever
   phase implements real hop-by-hop `MSG_DATA` relaying.
 - **Phase/date:** Phase 1, 2026-08-17.
+
+## `esp_now_send_cb_t` signature adapted for Arduino-ESP32 core 3.3.11
+- **Decision:** `transport::onEspNowSent()` in `espnow_transport.cpp` now
+  takes `const esp_now_send_info_t* tx_info` as its first parameter
+  (reading the destination MAC from `tx_info->des_addr`), not the raw
+  `const uint8_t* mac` it was originally written against.
+- **Reason:** The first real `arduino-cli compile` against the actually
+  installed `esp32:esp32` core (3.3.11) failed with `invalid conversion
+  from 'void(*)(const uint8_t*, esp_now_send_status_t)' to
+  'esp_now_send_cb_t' {aka 'void(*)(const wifi_tx_info_t*,
+  esp_now_send_status_t)'}`. Checked directly against the installed core's
+  own headers (`esp_wifi/include/esp_now.h`,
+  `esp_wifi/include/esp_wifi_types_generic.h`), not guessed: as of this
+  core version, `esp_now_send_cb_t` is
+  `void(*)(const esp_now_send_info_t*, esp_now_send_status_t)`, where
+  `esp_now_send_info_t` is a typedef of `wifi_tx_info_t`, which carries the
+  destination MAC in its `des_addr` member. This is exactly the kind of
+  API-drift risk `docs/testing.md` had flagged as unverified before a real
+  compile ran — the `esp_now_recv_cb_t` signature and `esp_now_peer_info_t`
+  (including `ifidx`) were also checked against the same headers and found
+  unchanged from what the code already assumed.
+- **Alternatives considered:** None — this is a mechanical adaptation to a
+  fixed external API, not a design choice with real alternatives.
+- **Why alternatives were rejected:** N/A.
+- **Impact:** One function signature and one added line
+  (`const uint8_t* mac = tx_info->des_addr;`) in
+  `src/transport/espnow_transport.cpp`. `transport::TxEvent`/`TxCallback`
+  (the module's own public interface, consumed by the rest of the
+  firmware) are unchanged — the adaptation is fully contained inside the
+  one function that talks directly to the ESP-NOW API. No architecture
+  change. See `docs/testing.md` for the real compile result.
+- **Phase/date:** Post-Phase-1 toolchain validation, 2026-08-17.
+
+## `predictor_core` split out as an Arduino-free pure module (mirrors `routing_core`)
+- **Decision:** The real EWMA/least-squares-slope/PDR/hysteresis math lives
+  in `src/predictor/predictor_core.h`/`.cpp`, zero Arduino/ESP-NOW/Serial
+  dependency, every function takes `now` explicitly. `src/predictor/predictor.cpp`
+  is a thin adapter: owns the one `PredictorState`, feeds it real RSSI
+  samples from the same receive dispatch point `routing::onPacketReceived`
+  already uses, and is the only half that touches `logger::*`/`millis()`.
+- **Reason:** Identical reasoning to
+  [routing_core's split](decisions.md#routing_core-split-out-as-an-arduino-free-pure-module)
+  in Phase 1: this is real algorithmic math worth verifying on its own, and
+  that only means something if it runs on a host compiler. Unlike
+  `routing_core.h` though, `predictor_core.h` deliberately `#include`s
+  `../config.h` directly — every numeric constant this module needs (EWMA
+  alphas, SLOPE_REF, fusion weights, hysteresis thresholds, debounce
+  counts, staleness timeout) is a real deployment/tuning parameter the
+  Phase 2 task spec explicitly requires centralized in `config.h` ("do not
+  scatter magic constants through predictor.cpp"), unlike `routing_core`'s
+  one internal constant (`MAX_HOP_COUNT`), which is an algorithm-intrinsic
+  safety bound, not a tunable. `config.h` has no Arduino dependency itself,
+  so this doesn't compromise host-testability.
+- **Alternatives considered:** (a) Keep predictor math directly in
+  Arduino-coupled `predictor.cpp`, static-review only. (b) Duplicate the
+  tuning constants as local `static const` values inside `predictor_core.h`
+  instead of including `config.h`.
+- **Why alternatives were rejected:** (a) Part 11 of the Phase 2 spec
+  explicitly requires deterministic, actually-run tests for "the
+  mathematics/state machine," which static review can't verify. (b) would
+  create two sources of truth for the same tunable values (or require
+  `predictor.cpp` to pass them all through as function parameters on every
+  call), directly contradicting "centralize... do not scatter."
+- **Impact:** Two new files (`predictor_core.h/.cpp`), a new
+  `test/test_predictor_core.cpp` (31/31 checks passing — see
+  `docs/testing.md`), and `config.h` gaining a full `PREDICTOR_*` constant
+  block.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## RSSI sample cadence reuses the existing Phase 1 beacon, not a new fast heartbeat
+- **Decision:** Phase 2 does not add any new wire message or a faster,
+  dedicated predictor heartbeat. RSSI samples arrive exactly when they
+  already did in Phase 1 — once per `ROUTING_HELLO_INTERVAL_MS` (1000ms),
+  via the existing `MSG_HEARTBEAT` beacon's arrival. `PREDICTOR_SLOPE_WINDOW`
+  is set to 8 samples (not the guide's literal "15-20") specifically to
+  keep the real-world slope-reaction window in the same single-digit-second
+  range implementation-guide.html §5.1 intends, given the slower ~1Hz
+  sample rate this phase actually has.
+- **Reason:** Part 1 of the Phase 2 task spec is explicit: "Do not
+  duplicate the radio reception mechanism. The predictor consumes
+  observations produced by the existing transport/routing architecture."
+  The guide's own timing table (100-200ms heartbeat, 15-20 sample window,
+  ~2-4s reaction) is an aspirational target that assumes a heartbeat
+  Phase 1 deliberately did not build at that cadence (see
+  `ROUTING_HELLO_INTERVAL_MS`'s own Phase 1 decision, which explicitly
+  anticipated this exact moment: "Deliberately decoupled from the
+  predictor's future heartbeat cadence... reusing one constant would
+  prematurely couple two layers' timing before the predictor layer
+  exists"). Now that the predictor layer exists, the honest choice is
+  between (a) adding a second, faster wire message just to hit that
+  cadence, or (b) reusing what exists and scaling the sample-count-based
+  parameters to match. A second wire message is real new protocol surface
+  and channel traffic for a 5-node hackathon demo where "visibly moves the
+  Serial monitor within a demo-able timeframe" (the guide's own Faraday-bag
+  acceptance bar, §06) does not require sub-second resolution.
+- **Alternatives considered:** (a) Add a dedicated, faster
+  `MSG_PREDICTOR_PING`-style beacon at 100-200ms. (b) Literally keep
+  `PREDICTOR_SLOPE_WINDOW` at 15-20 despite the slower cadence.
+- **Why alternatives were rejected:** (a) is real scope growth (a new
+  message type, more channel traffic, another timer) for a benefit the
+  Phase 2 spec doesn't ask for and the demo bar doesn't need — and Part 1
+  explicitly forbids duplicating the reception mechanism. (b) would make
+  the slope window span ~15-20 seconds of real time, far slower than the
+  guide's own stated intent ("Gives the slope estimator resolution — 1 Hz
+  is far too slow to beat a timeout") and slower than useful for a live
+  demo.
+- **Impact:** `PREDICTOR_SLOPE_WINDOW = 8` in `config.h`, documented there
+  and in `docs/parameters.md`. Revisit if a later phase adds real
+  hardware-driven demo timing pressure that this window can't meet.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## `link_score` fusion constants: guide values used exactly where given, derived where not
+- **Decision:** `PREDICTOR_RSSI_EWMA_ALPHA` (0.3) and
+  `PREDICTOR_LINK_SCORE_W1`/`W2` (0.5/0.5) are taken directly from
+  implementation-guide.html §5.1, which states them explicitly.
+  `PREDICTOR_PDR_EWMA_ALPHA` (0.1) is *derived*, not guessed: the guide
+  states a 20-frame PDR window, and the standard EWMA/simple-moving-average
+  equivalence `alpha = 2/(N+1)` gives `2/21 ≈ 0.0952`, rounded to 0.1.
+  `PREDICTOR_SLOPE_REF_DBM_PER_SAMPLE` (1.5) is a genuine placeholder — the
+  guide names `SLOPE_REF` in its pseudocode but gives no numeric value —
+  chosen so a sustained ~1.5 dBm-per-sample decline fully saturates
+  `degrade_term` to 1.0.
+- **Reason:** Where the guide gives an exact value, using anything else
+  would be an unjustified deviation from the source of truth. Where it
+  doesn't (PDR alpha, SLOPE_REF), the task spec's own instruction applies:
+  "choose the smallest defensible formula and record the decision" — PDR
+  alpha has a principled derivation from a value the guide *does* give
+  (the 20-frame window), so it's not arbitrary; SLOPE_REF has no such
+  anchor and is honestly documented as a starting figure needing real
+  hardware to tune, exactly the kind of parameter the guide itself expects
+  to be empirically adjusted (§06's "Faraday bag" test).
+- **Alternatives considered:** Implement PDR as an explicit 20-slot ring
+  buffer (literal windowed ratio) instead of an EWMA.
+- **Why alternatives were rejected:** Part 4 of the Phase 2 spec explicitly
+  permits "an EWMA-smoothed PDR or equivalent bounded communication-quality
+  metric" — an EWMA needs one float of state per neighbor instead of 20
+  bytes/booleans, a real memory saving on a 5-node embedded target, with no
+  loss of the guide's intended behavior (a ~20-observation effective
+  memory).
+- **Impact:** All five constants centralized in `config.h`, documented in
+  `docs/parameters.md`. `PREDICTOR_SLOPE_REF_DBM_PER_SAMPLE` is flagged
+  there as the one value most likely to need retuning once real hardware
+  attenuation data exists.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## Two-threshold hysteresis combined with the guide's own 3-consecutive-sample debounce
+- **Decision:** `predictor_core`'s health state machine uses two thresholds
+  (`PREDICTOR_HYSTERESIS_T_LOW` = 0.5, `PREDICTOR_HYSTERESIS_T_HIGH` = 0.7)
+  *and* a consecutive-evaluation counter in each direction
+  (`PREDICTOR_CONSECUTIVE_BAD_COUNT` = 3,
+  `PREDICTOR_CONSECUTIVE_GOOD_COUNT` = 3) — not either mechanism alone.
+  While HEALTHY, `belowCount` only increments on a `< T_LOW` evaluation and
+  a transition to UNHEALTHY only fires once it reaches the bad-count
+  threshold; the symmetric logic (`aboveCount`/`T_HIGH`) governs recovery.
+  A score sitting between the two thresholds never advances either
+  counter, in either state.
+- **Reason:** implementation-guide.html §5.1's own pseudocode uses a single
+  `THRESHOLD` plus a 3-consecutive-evaluation debounce ("reroute if below
+  threshold for 3 consecutive evaluations"). The Phase 2 task spec
+  explicitly overrides the single-threshold part ("Do NOT use a single
+  threshold... Use two thresholds: T_LOW, T_HIGH") while Part 9 separately
+  asks for the guide's own consecutive-sample gating to still be
+  implemented. These aren't in conflict — T_LOW plays the role the guide
+  calls `THRESHOLD` for the degrade direction; T_HIGH is the new
+  recovery-direction threshold; the debounce count applies to crossings of
+  whichever threshold is currently relevant. `PREDICTOR_CONSECUTIVE_GOOD_COUNT`
+  reuses the same value as the bad-direction count since the guide gives no
+  separate recovery-direction figure and nothing suggests recovering should
+  be easier to trigger than degrading was to detect.
+- **Alternatives considered:** (a) Two thresholds with no debounce (react
+  instantly on any single crossing). (b) A three-state machine
+  (HEALTHY/DEGRADING/UNHEALTHY) instead of two states plus a boolean
+  `degrading` result flag.
+- **Why alternatives were rejected:** (a) drops the guide's own explicit
+  debounce requirement (Part 9), reintroducing exactly the single-noisy-
+  sample sensitivity hysteresis is meant to prevent. (b) A third persistent
+  state adds a whole extra set of transition rules for a distinction
+  (soft-warning vs. hard-unhealthy) the Phase 2 spec's test scenarios don't
+  actually require as *state* — `RecomputeResult.degrading` (Part 10's
+  `LINK_DEGRADING` event) already carries that information as a
+  transient signal without complicating the persistent state machine.
+- **Impact:** `predictor_core.cpp`'s `recomputeLocked()`. Test scenarios 9,
+  10, 11, 12 in `test/test_predictor_core.cpp` exercise exactly this
+  combined logic and all pass — see `docs/testing.md`.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## Independent staleness fast-path deliberately bypasses the debounce
+- **Decision:** `predictor_core::tickStaleness()` (and the equivalent check
+  inside `onSendOutcome`) forces `UNHEALTHY` the instant
+  `PREDICTOR_STALENESS_TIMEOUT_MS` (2000ms) elapses with no fresh RSSI
+  sample — it does not go through `belowCount`/`PREDICTOR_CONSECUTIVE_BAD_COUNT`
+  at all.
+- **Reason:** Part 5 of the Phase 2 spec frames staleness as a *fast path*
+  specifically because slope-based detection structurally cannot see a
+  sudden silence ("no new RSSI samples -> no meaningful RSSI slope ->
+  slope-only predictor can miss the failure"). Gating it behind the same
+  3-consecutive-evaluation debounce used for noisy-but-still-arriving
+  samples would defeat the entire purpose — there is no new evaluation
+  happening during silence for a counter to accumulate against.
+  `PREDICTOR_STALENESS_TIMEOUT_MS` is deliberately set to 2x the beacon
+  interval (2000ms), faster than `ROUTING_ENTRY_TIMEOUT_MS`'s 3x (3000ms),
+  so this fast path can flag a dying link before routing's own hard
+  fallback expires the route entirely — matching the guide's stated intent
+  that the proactive path should normally act first ("heartbeat timeout
+  stays armed regardless, as a hard fallback").
+- **Alternatives considered:** (a) One shared timeout for both routing
+  staleness and predictor staleness (reusing `ROUTING_ENTRY_TIMEOUT_MS`).
+  (b) Apply the same debounce counters to the staleness path too.
+- **Why alternatives were rejected:** (a) would make the predictor's "fast
+  path" exactly as slow as routing's hard fallback, defeating the
+  "proactive... before a heartbeat timeout" framing from
+  implementation-guide.html's own opening description of this feature. (b)
+  is structurally impossible in a meaningful way — silence produces no new
+  evaluations to debounce over. This is a deliberate, documented case of
+  *not* collapsing two timers into one, the opposite of Phase 1's shared
+  `ROUTING_ENTRY_TIMEOUT_MS` decision — justified here specifically because
+  the two timeouts now need to race each other, not describe the same
+  fact.
+- **Impact:** `PREDICTOR_STALENESS_TIMEOUT_MS` in `config.h`, documented in
+  `docs/parameters.md` alongside the HELLO-interval/route-timeout
+  relationship it's designed against. Test scenario 7 in
+  `test/test_predictor_core.cpp` exercises this directly.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## PDR measurement boundary: not wired to live send outcomes in Phase 2
+- **Decision:** `predictor::onSendResult(NodeId, bool)` and
+  `predictor_core::onSendOutcome()` are real, fully implemented, and
+  independently tested (`test/test_predictor_core.cpp` scenarios 5, 6, 8),
+  but nothing in the live firmware calls `predictor::onSendResult()` yet.
+  `main.cpp`'s `onTransportTx()` remains the Phase 0 no-op stub.
+- **Reason:** Two independent problems block wiring this for real in Phase
+  2, both explicitly called out by the task spec rather than papered over.
+  First: implementation-guide.html's PDR concept ("delivered/sent") and
+  the task spec's own warning both require *unicast* send outcomes — ESP-NOW
+  broadcast frames get no 802.11 MAC-layer ACK, so a broadcast send's
+  "success" callback fires once the driver accepts the frame for
+  transmission, not on confirmed delivery to any receiver ("Do not use
+  broadcast transmission success callbacks as proof of MAC-layer
+  delivery"). Every send this firmware currently performs is the
+  `MSG_HEARTBEAT` beacon, sent to the broadcast MAC (see
+  [decisions.md](decisions.md#hello-and-route-advertisement-share-one-wire-message-msg_heartbeat)) —
+  there is no unicast traffic anywhere in Phase 0-2's runtime behavior to
+  measure at all; real unicast `MSG_DATA` relaying is reliability-layer
+  scope (§5.4), excluded from both Phase 1 and Phase 2. Second, even if
+  there were unicast sends, `transport::TxEvent` identifies a destination
+  by MAC address, not `NodeId`, and `core/node_id.h`'s `NODE_TABLE` MACs
+  are still the Phase 0 all-zero placeholder sentinel (no hardware exists
+  to populate them yet — see
+  [known-issues.md](known-issues.md#peer-mac-addresses-are-placeholders)).
+  Building a MAC->NodeId reverse lookup against placeholder zero MACs
+  would make every neighbor indistinguishable and match ambiguously or
+  falsely — exactly the kind of invented/fabricated observation the task
+  spec forbids ("Do not invent packet success").
+- **Alternatives considered:** (a) Wire `onTransportTx()` to
+  `predictor::onSendResult()` anyway, treating broadcast beacon
+  send-accepted status as a rough proxy for delivery. (b) Fabricate a
+  MAC->NodeId table now so the wiring can be demonstrated end-to-end.
+- **Why alternatives were rejected:** (a) is precisely the broadcast/
+  MAC-layer-ACK confusion the task spec explicitly warns against — a
+  broadcast "success" here would almost always be true regardless of
+  whether any neighbor actually heard it, making the PDR signal
+  meaningless-but-confidently-wrong, worse than having no signal at all.
+  (b) is inventing data to make a demo path look wired when it isn't -
+  forbidden by the project's standing "no fake packet delivery" rule (see
+  [decisions.md](decisions.md#broadcast-peer-as-the-phase-0-espnow-bootstrap)'s
+  same principle applied to Phase 0).
+- **Impact:** `link_score` in Phase 2's live runtime is computed from real
+  RSSI evidence + the staleness fast-path, with PDR evidence sitting at its
+  documented neutral default (1.0, "no data yet," not a fabricated good
+  reading) until a later phase's real unicast reliability traffic exists to
+  drive it. The math and API are complete and tested now specifically so
+  wiring it later is a one-line change (call `predictor::onSendResult()`
+  from wherever real unicast delivery confirmation first exists), not a
+  redesign. Documented here as the explicit Phase 2 measurement boundary,
+  per the task spec's own instruction to do exactly that rather than invent
+  one.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## Link health integrated into `routing_core::selectNextHop` alongside, not instead of, the priority-only-edge rule
+- **Decision:** `routing_core::selectNextHop()` gained a new, optional,
+  default-`nullptr` parameter, `const bool* neighborUnhealthy`. NORMAL
+  selection (`priority == false`) now prefers the minimum-hop-count
+  candidate among those that are both (a) not reached via a priority-only
+  edge (Phase 1's rule, unchanged) and (b) not flagged unhealthy — falling
+  back to the best candidate regardless of health if every eligible
+  candidate is unhealthy (health gates *preference*, never *validity*).
+  PRIORITY selection (`priority == true`) ignores `neighborUnhealthy`
+  entirely and unconditionally, structurally guaranteeing link_score can
+  never suppress the priority override. The `isPriorityOnlyEdge` exclusion
+  itself is **kept, unchanged** — not removed or replaced.
+- **Reason:** `CLAUDE.md`'s own standing instruction anticipated this
+  moment: "Phase 1's priority-only-edge special case in `routing_core` is
+  meant to be replaced by real link-quality-aware selection once
+  `link_score` exists — don't leave both mechanisms active at once without
+  a documented reason." This is that documented reason. Removing the
+  exclusion outright was considered and rejected: without real hardware,
+  `predictor_core` cannot yet organically produce a *worse* score for the
+  direct A-S link than for A-B — both start at, and without live
+  attenuation data stay at, the same neutral defaults. Ranking purely by
+  link_score-then-hop-count with the exclusion removed would therefore
+  make NORMAL traffic take the 1-hop A-S link exactly like PRIORITY
+  traffic does, silently breaking the Phase 1 acceptance criterion
+  (`test_normal_selects_b_not_direct_s`, still passing, unchanged) and the
+  documented demo narrative — not because link-quality selection is wrong,
+  but because there is no real evidence yet for it to act on. Fabricating
+  a worse starting score for A-S to force the old behavior back would
+  violate the "no fake data" rule the same way inventing PDR would. The
+  two mechanisms therefore answer two different, non-overlapping
+  questions: `isPriorityOnlyEdge` decides *eligibility* for NORMAL traffic
+  (a static, topology-level fact from implementation-guide.html §01's own
+  diagram), while `neighborUnhealthy` decides *preference* among eligible
+  candidates (a dynamic, evidence-based fact). Test scenario 14
+  (`test_normal_avoids_unhealthy_b`) exercises exactly this: B and C are
+  both NORMAL-eligible (neither is the priority-only edge), and marking B
+  unhealthy correctly promotes C — proving the new mechanism works without
+  ever needing to touch the A-S exclusion.
+- **Alternatives considered:** (a) Remove `isPriorityOnlyEdge` entirely,
+  rank NORMAL selection purely by `[health tier, then hop count]`. (b)
+  Keep both mechanisms with no interaction documented (add link_score
+  filtering as a second, separate pass with no explanation of why the
+  exclusion still exists).
+- **Why alternatives were rejected:** (a) — see Reason above; breaks a
+  passing Phase 1 test and the demo narrative on the basis of a score
+  difference that doesn't exist yet without real hardware. (b) is exactly
+  what `CLAUDE.md` says not to do — leaving two mechanisms coexisting with
+  no stated reason for why neither fully subsumes the other.
+- **Impact:** `routing_core.h`/`.cpp`'s `selectNextHop()` signature change
+  is backward-compatible (default parameter) — all 18 pre-existing Phase 1
+  tests pass unmodified. `routing.cpp`'s `getNextHop()` now builds the
+  `neighborUnhealthy` array from `predictor::isUnhealthy()` before calling
+  `routing_core::selectNextHop()`. The condition for revisiting the
+  `isPriorityOnlyEdge` exclusion is now precise and testable: once real
+  hardware demonstrates the A-S link's `link_score` genuinely and
+  persistently scoring worse than A-B's under real attenuation, the
+  exclusion becomes provably redundant and should be removed then — not
+  before.
+- **Phase/date:** Phase 2, 2026-08-17.
+
+## No `MeshPacket`/wire format changes needed for Phase 2
+- **Decision:** `core/packet.h` and `docs/protocol.md`'s wire layout are
+  completely unchanged from Phase 1. No new `MessageType`, no new packet
+  field, no link_score/health data added to any beacon payload.
+- **Reason:** `link_score` as implemented in Phase 2 is a purely local
+  quantity — each node's own evaluation of its own direct radio links,
+  consumed only by that same node's own `routing::getNextHop()`. Part 7 of
+  the Phase 2 task spec asks for routing to evaluate "the health of the
+  link to each candidate next hop," which is exactly this local
+  relationship (candidate's via-neighbor = a direct neighbor = a link this
+  node itself observes) — it never requires a node to know a *remote*
+  node's assessment of a *different* link. Nothing in Phase 2's stated
+  scope asks for link-quality data to be advertised over the air.
+- **Alternatives considered:** Extend the `MSG_HEARTBEAT` route-advertisement
+  payload to also carry each entry's link_score, so neighbors could
+  propagate quality information multiple hops.
+- **Why alternatives were rejected:** Not required by Part 7's actual
+  integration scope (local candidate evaluation only), and doing it anyway
+  would be speculative protocol growth — exactly the "don't add fields
+  because they may be useful" principle Phase 0 already established for
+  `MeshPacket`. If a later phase wants multi-hop-aware link quality
+  (propagating "the B-S link is degrading" to A), that's a real, separate
+  design question deserving its own decision when that phase actually
+  needs it.
+- **Impact:** None to the wire format. `docs/protocol.md` gets a short note
+  confirming this was considered, not overlooked.
+- **Phase/date:** Phase 2, 2026-08-17.

@@ -1,6 +1,6 @@
 # Architecture
 
-Status: **Phase 1 — transport + routing real, predictor/anomaly/reliability/telemetry
+Status: **Phase 2 — transport + routing + predictor real, anomaly/reliability/telemetry
 still stubs.** This document describes what exists now and the shape it's
 built to grow into. It does not describe algorithms that aren't
 implemented yet — see [known-issues.md](known-issues.md) for those.
@@ -53,8 +53,8 @@ Bottom to top, matching implementation-guide.html §01:
 |---|---|---|
 | Transport (ESP-NOW) | **Implemented** (Phase 0) | `src/transport/` |
 | Reliability (ACK, retransmit, dup-filter) | Stub interface only | `src/reliability/` |
-| Routing (distance-vector + priority override) | **Implemented** (Phase 1) | `src/routing/` |
-| Predictor (RSSI slope + PDR fusion) | Stub interface only | `src/predictor/` |
+| Routing (distance-vector + priority override + link-health-aware selection) | **Implemented** (Phase 1, extended Phase 2) | `src/routing/` |
+| Predictor (RSSI EWMA/slope + PDR + staleness fusion) | **Implemented** (Phase 2) | `src/predictor/` |
 | Anomaly (MAD Z-score + flatline) | Stub interface only | `src/anomaly/` |
 | Reporting (OLED + Serial/WebSerial) | Stub interface only | `src/telemetry/` |
 
@@ -62,9 +62,15 @@ Data is meant to flow bottom-up: raw radio -> statistics -> routing
 decisions -> reliability -> reporting. Phase 0 wired the bottom layer for
 real; Phase 1 wired routing on top of it, consuming
 `transport::RxEvent`/`TxEvent` instead of touching `esp_now_*` APIs
-directly — the receive path is now: ESP-NOW callback -> `transport::RxEvent`
--> `main.cpp` parses a `MeshPacket` -> `routing::onPacketReceived()`.
-Reliability/predictor/anomaly/telemetry remain clean call-through stubs
+directly — the receive path is: ESP-NOW callback -> `transport::RxEvent`
+-> `main.cpp` parses a `MeshPacket` -> `routing::onPacketReceived()`. Phase
+2 added the predictor as a peer consumer of that same parsed packet +
+RSSI, not a layer routing depends on structurally — `main.cpp` hands the
+same `(pkt, rssi)` to both `routing::onPacketReceived()` and
+`predictor::onPacketReceived()`. Routing then closes the loop by *reading*
+predictor's per-neighbor health via `predictor::isUnhealthy()` when
+choosing a NORMAL next hop (see "Routing + predictor integration (Phase
+2)" below). Reliability/anomaly/telemetry remain clean call-through stubs
 for later phases.
 
 ## Firmware layout and why it's structured this way
@@ -84,16 +90,20 @@ firmware/PredictiveMesh/
     ├── transport/
     │   └── espnow_transport.h/.cpp   <- owns all esp_now_*/WiFi calls
     ├── routing/
-    │   ├── routing_core.h/.cpp   <- pure distance-vector algorithm, no Arduino dependency
+    │   ├── routing_core.h/.cpp   <- pure distance-vector algorithm + link-health-aware
+    │   │                            selection, no Arduino dependency
     │   └── routing.h/.cpp        <- Arduino-facing adapter (millis/logger/transport::send)
-    ├── predictor/     <- stub
+    ├── predictor/
+    │   ├── predictor_core.h/.cpp <- pure EWMA/slope/PDR/hysteresis algorithm, no Arduino dependency
+    │   └── predictor.h/.cpp      <- Arduino-facing adapter (millis/logger)
     ├── anomaly/       <- stub
     ├── reliability/   <- stub
     └── telemetry/     <- stub
 
 firmware/PredictiveMesh/test/
-└── test_routing_core.cpp   <- host-compiled (g++) unit tests for routing_core;
-                                see docs/testing.md
+├── test_routing_core.cpp     <- host-compiled (g++) unit tests for routing_core
+└── test_predictor_core.cpp   <- host-compiled (g++) unit tests for predictor_core
+                                  see docs/testing.md for both
 ```
 
 ### Why `src/` and not files flat in the sketch folder
@@ -139,7 +149,7 @@ has an OLED, its neighbor list — is looked up from that single value via
 [decisions.md](decisions.md) for why this was chosen over MAC-based
 auto-detection.
 
-## Packet flow (as of Phase 1)
+## Packet flow (as of Phase 2)
 
 1. `transport::begin()` brings up WiFi in station mode, fixes the channel,
    initializes ESP-NOW, and registers the recv/send callbacks.
@@ -151,25 +161,37 @@ auto-detection.
    **real** RSSI value read from `info->rx_ctrl->rssi`, then `main.cpp`'s
    `onTransportRx()` `memcpy()`s it into a local `MeshPacket` (never
    pointer-casts the raw buffer — see `core/packet.h`) and hands it to
-   `routing::onPacketReceived()`.
+   **both** `routing::onPacketReceived()` **and** `predictor::onPacketReceived()`
+   — the same parsed `(pkt, rssi)`, two independent consumers.
 4. `routing::onPacketReceived()` always refreshes neighbor liveness for
    `pkt.prev_hop`; if the packet is `MSG_HEARTBEAT`, it also parses the
    payload as a distance-vector advertisement and folds it into the
    routing table (`routing_core::applyRouteAdvertisement()`).
-5. `app::loop()` calls `routing::tick()` every iteration. `tick()`
-   rate-limits itself: it sends this node's own HELLO/route-advertisement
-   beacon once per `ROUTING_HELLO_INTERVAL_MS`, and sweeps for stale
-   neighbor/route entries older than `ROUTING_ENTRY_TIMEOUT_MS`.
-6. Whenever something needs a next hop for a destination —
+5. `predictor::onPacketReceived()` feeds `pkt.prev_hop`'s RSSI into that
+   neighbor's EWMA/slope pipeline (`predictor_core::onRssiSample()`),
+   recomputes `link_score`, and logs `[PREDICTOR] neighbor=... rssi_ewma=...
+   slope=... pdr=... score=... health=...` — see "Routing + predictor
+   integration (Phase 2)" below for what evidence feeds the score.
+6. `app::loop()` calls `routing::tick()` then `predictor::tick()` every
+   iteration. `routing::tick()` rate-limits itself: it sends this node's
+   own HELLO/route-advertisement beacon once per `ROUTING_HELLO_INTERVAL_MS`,
+   and sweeps for stale neighbor/route entries older than
+   `ROUTING_ENTRY_TIMEOUT_MS`. `predictor::tick()` independently sweeps
+   every direct neighbor for the staleness fast-path
+   (`PREDICTOR_STALENESS_TIMEOUT_MS`, deliberately faster than routing's
+   own timeout — see [parameters.md](parameters.md)).
+7. Whenever something needs a next hop for a destination —
    `routing::getNextHop(destination, priority)` or the packet-shaped
-   wrapper `routing::selectNextHop(pkt)` — routing picks the best surviving
-   candidate from its table (excluding priority-only edges unless
-   `priority == true`), logs `[ROUTE] dst=... next=... hops=... priority=...`,
-   and fires a `ROUTE_SELECTED` event to whatever's registered via
+   wrapper `routing::selectNextHop(pkt)` — routing builds a per-neighbor
+   health mask from `predictor::isUnhealthy()`, then picks the best
+   surviving candidate from its table (excluding priority-only edges and,
+   for NORMAL traffic only, preferring healthy candidates — see below),
+   logs `[ROUTE] dst=... next=... hops=... priority=...`, and fires a
+   `ROUTE_SELECTED` event to whatever's registered via
    `routing::setEventCallback()`.
 
-See [protocol.md](protocol.md) for the route-advertisement payload layout
-and [testing.md](testing.md) for how the algorithm is validated without
+See [protocol.md](protocol.md) for why no wire format changed in Phase 2
+and [testing.md](testing.md) for how both algorithms are validated without
 hardware.
 
 ## Routing layer (Phase 1)
@@ -201,6 +223,64 @@ implementation-guide.html §01, not invented):
   [decisions.md](decisions.md#a↔s-edge-modeled-as-priority-only-excluded-from-normal-selection)
   for the full reasoning — this is the one place Phase 1 had to make a
   judgment call rather than just implement the spec literally.
+
+## Predictor layer (Phase 2)
+
+`src/predictor/` follows the exact same pure-core/adapter split as
+routing:
+
+- **`predictor_core.h`/`.cpp`** — the actual EWMA/least-squares-slope/PDR/
+  hysteresis math: per-neighbor `NeighborLinkState` (RSSI EWMA + ring
+  buffer, PDR EWMA, fused `link_score`, hysteresis state), `onRssiSample`,
+  `onSendOutcome`, `tickStaleness`. Zero Arduino dependency. This is what
+  `firmware/PredictiveMesh/test/test_predictor_core.cpp` compiles and runs
+  directly with a host compiler — see [testing.md](testing.md).
+- **`predictor.h`/`.cpp`** — the thin Arduino-facing adapter. Owns the one
+  `PredictorState` instance, feeds it real RSSI from the same
+  `main.cpp` receive dispatch routing already uses, logs the evidence
+  behind every score, and fires `LINK_SCORE_UPDATED`/`LINK_DEGRADING`/
+  `LINK_UNHEALTHY`/`LINK_RECOVERED` events.
+
+The pipeline, per direct neighbor: raw RSSI → EWMA (`PREDICTOR_RSSI_EWMA_ALPHA`)
+→ least-squares slope over `PREDICTOR_SLOPE_WINDOW` samples of the *smoothed*
+signal → `degrade_term` → fused with PDR into `link_score` (`PREDICTOR_LINK_SCORE_W1`/`W2`)
+→ a two-threshold, debounced hysteresis state machine
+(`PREDICTOR_HYSTERESIS_T_LOW`/`T_HIGH`, `PREDICTOR_CONSECUTIVE_BAD_COUNT`/`GOOD_COUNT`)
+classifies the link HEALTHY or UNHEALTHY. An independent staleness fast-path
+(`PREDICTOR_STALENESS_TIMEOUT_MS`) can force UNHEALTHY immediately on
+silence, bypassing the debounce entirely — see
+[parameters.md](parameters.md) for the full formula/threshold table and
+[decisions.md](decisions.md) for why each constant has the value it does.
+
+**PDR is real but not yet live-fed**: the math and API
+(`predictor::onSendResult()`) are complete and independently tested, but
+nothing in the current firmware calls it — every send this firmware
+performs today is a broadcast `MSG_HEARTBEAT` beacon, and ESP-NOW broadcast
+has no MAC-layer delivery ACK to measure, so there is no real per-neighbor
+unicast send outcome to observe yet. See
+[decisions.md](decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2)
+for the full reasoning. Until then, PDR evidence sits at its documented
+neutral default (1.0) and `link_score` is driven by RSSI evidence + the
+staleness fast-path.
+
+**Routing + predictor integration**: `routing::getNextHop()` builds a
+`bool[NODE_ID_COUNT]` health mask from `predictor::isUnhealthy()` and
+passes it into `routing_core::selectNextHop()`'s new optional
+`neighborUnhealthy` parameter. NORMAL selection now prefers a healthy
+candidate over an unhealthy one at the same or worse hop count, falling
+back to the best available candidate if every eligible one is unhealthy
+(health gates *preference*, never *validity* — Phase 1's staleness/
+invalidity mechanism alone still controls whether a candidate exists at
+all). PRIORITY selection ignores the health mask completely and
+unconditionally — link_score can never suppress the priority override.
+Critically, this sits **alongside**, not **instead of**, the
+priority-only-edge rule above: without real hardware, `link_score` cannot
+yet organically make the A-S edge look worse than A-B, so removing the
+topology-level exclusion would silently break the documented "NORMAL
+avoids the weak direct link" demo behavior. See
+[decisions.md](decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule)
+for the full reasoning, including the precise condition under which the
+exclusion should eventually be removed.
 
 ## Practical theory notes
 

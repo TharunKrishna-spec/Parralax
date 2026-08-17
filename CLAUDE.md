@@ -20,25 +20,37 @@ wrong or incomplete, document the concern in
 
 ## Current state
 
-**Phase 1 complete** (2026-08-17) — distance-vector routing + priority
-override, on top of the Phase 0 firmware foundation. See
+**Phase 2 complete** (2026-08-17) — fused link-degradation predictor
+(RSSI EWMA/slope + PDR + staleness), integrated into Phase 1's routing, on
+top of the Phase 0 firmware foundation. See
 [`docs/phase-log.md`](docs/phase-log.md) for the full record.
 
 What exists and works: Arduino sketch structure (`firmware/PredictiveMesh/`),
 centralized node identity (`THIS_NODE_ID` in `src/config.h`), the
 `MeshPacket` wire format, a real ESP-NOW transport layer, structured Serial
-logging (all Phase 0) — plus, as of Phase 1, a real distance-vector routing
-table with HELLO/route-advertisement beacons, staleness expiry, and the
-priority-flag override, split into an Arduino-free algorithm core
-(`src/routing/routing_core.h/.cpp`, unit-tested with a host-compiled g++
-harness — 18/18 checks passing, see `docs/testing.md`) and a thin Arduino
-adapter (`src/routing/routing.h/.cpp`).
+logging (Phase 0); a real distance-vector routing table with
+HELLO/route-advertisement beacons, staleness expiry, and the priority-flag
+override (Phase 1); and now a real predictor — per-neighbor RSSI EWMA +
+least-squares slope, PDR EWMA, a fused `link_score`, a two-threshold
+debounced hysteresis state machine, and an independent staleness fast-path
+— feeding into NORMAL route selection (Phase 2). Both routing and
+predictor keep the Arduino-free-core / thin-adapter split
+(`src/routing/routing_core.h/.cpp` + `routing.h/.cpp`,
+`src/predictor/predictor_core.h/.cpp` + `predictor.h/.cpp`), each
+unit-tested with a host-compiled g++ harness — 21/21 (routing) and 31/31
+(predictor) checks passing, see `docs/testing.md`. As of Phase 2, the
+**whole Phase 0+1+2 sketch has also been compiled for real** against the
+installed `esp32:esp32` core 3.3.11 (`arduino-cli`) — 0 errors, 0 warnings
+after one real API-drift fix (`esp_now_send_cb_t`'s signature, see
+`docs/decisions.md`).
 
-What's stubbed (interfaces only, no algorithms): `predictor/`, `anomaly/`,
+What's stubbed (interfaces only, no algorithms): `anomaly/`,
 `reliability/`, `telemetry/`. Also not yet built: actual hop-by-hop
 relaying of a received `MSG_DATA` packet (routing decides a next hop;
 nothing acts on that decision for someone else's packet yet — that's the
-reliability layer's job).
+reliability layer's job), and live PDR evidence (`predictor::onSendResult()`
+is implemented and tested but has no live caller yet — no real unicast
+traffic exists to measure; see `docs/decisions.md`).
 
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
@@ -46,28 +58,30 @@ Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 Arduino-build-system mechanics (`src/` subfolder compilation) this layout
 depends on.
 
-**Still outstanding regardless of phase:** no `esp32:esp32` Arduino core is
-installed anywhere accessible in this environment, so neither Phase 0 nor
-Phase 1 firmware has been run through a real `arduino-cli compile`. See
-`docs/testing.md`.
+**Still outstanding regardless of phase:** the compile check above
+validates that the firmware *builds*; nothing has run on real silicon yet
+— no boards exist. See `docs/known-issues.md`.
 
 ## Next movement
 
-**Waiting on explicit go-ahead for Phase 2** — do not start it
-unprompted. Per the roadmap in implementation-guide.html §06 (Hours 6-12),
-Phase 2 is the fused link predictor: RSSI EWMA smoothing, least-squares
-slope over window W, PDR sliding window, and the fused `link_score`
-(§5.1), landing in `src/predictor/`. Anomaly (§5.2) and reliability (§5.4)
-are later phases still.
+**Waiting on explicit go-ahead for Phase 3** — do not start it
+unprompted. Per the roadmap in implementation-guide.html §06 (Hours 12+),
+later phases are the anomaly engine (§5.2: MAD Z-score + flatline
+detector) and the reliability layer (§5.4: hop-by-hop ACK, retransmit,
+duplicate filtering, and actual multi-hop `MSG_DATA` relaying).
 
-Before touching `src/predictor/` for real: reread
-[`docs/parameters.md`](docs/parameters.md) (the predictor timing table —
-heartbeat interval, slope window W, PDR window, MAD-Z threshold, flatline
-STUCK_N — documented but not yet wired into code) and
-[`docs/decisions.md`](docs/decisions.md#a↔s-edge-modeled-as-priority-only-excluded-from-normal-selection)
-(Phase 1's priority-only-edge special case in `routing_core` is meant to
-be replaced by real link-quality-aware selection once `link_score` exists
-— don't leave both mechanisms active at once without a documented reason).
+Two things worth rereading before starting Phase 3:
+- [`docs/decisions.md`](docs/decisions.md#pdr-measurement-boundary-not-wired-to-live-send-outcomes-in-phase-2) —
+  the reliability layer's hop-by-hop ACK mechanism is the natural point to
+  finally wire `predictor::onSendResult()` to a real unicast delivery
+  signal; don't build a second, parallel PDR mechanism instead.
+- [`docs/decisions.md`](docs/decisions.md#link-health-integrated-into-routing_coreselectnexthop-alongside-not-instead-of-the-priority-only-edge-rule) —
+  `routing_core::isPriorityOnlyEdge`'s hard exclusion is still active
+  alongside real link-health-aware selection, specifically because no
+  hardware exists yet to prove `link_score` alone would reproduce the same
+  NORMAL-avoids-the-weak-direct-link behavior. Revisit only once real
+  hardware/attenuation data exists to check that condition for real — not
+  before.
 
 ## Workflow rules (durable — apply every session)
 
