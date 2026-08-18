@@ -8,6 +8,7 @@
 #include "predictor/predictor.h"
 #include "anomaly/anomaly.h"
 #include "reliability/reliability.h"
+#include "suppression/suppression.h"
 #include "telemetry/telemetry.h"
 #include "ucb1/ucb1.h"
 #include "apptraffic/apptraffic.h"
@@ -37,6 +38,7 @@ void onTransportRx(const transport::RxEvent& evt) {
   routing::onPacketReceived(pkt, evt.rssi);
   predictor::onPacketReceived(pkt, evt.rssi);
   reliability::onPacketReceived(pkt, evt.rssi);
+  suppression::onPacketReceived(pkt, evt.rssi);
 }
 
 void onTransportTx(const transport::TxEvent& evt) {
@@ -113,6 +115,24 @@ void onReliabilityEvent(const reliability::ReliabilityEvent& evt) {
   telemetry::onReliabilityEvent(evt);
 }
 
+// Priority-broadcast milestone's event stream (broadcast/overheard/
+// forward/suppressed/delivered) - logged for now, same pattern as
+// onRouteEvent/onLinkEvent/onAnomalyEvent/onReliabilityEvent above. A
+// later phase (telemetry/GUI) subscribes via suppression::setEventCallback()
+// instead of adding a new hook here.
+void onSuppressionEvent(const suppression::SuppressionEvent& evt) {
+  const char* typeStr =
+      evt.type == suppression::SuppressionEventType::PRIORITY_BROADCAST  ? "PRIORITY_BROADCAST"
+      : evt.type == suppression::SuppressionEventType::PRIORITY_OVERHEARD ? "PRIORITY_OVERHEARD"
+      : evt.type == suppression::SuppressionEventType::PRIORITY_FORWARD    ? "PRIORITY_FORWARD"
+      : evt.type == suppression::SuppressionEventType::PRIORITY_SUPPRESSED  ? "PRIORITY_SUPPRESSED"
+                                                                               : "PRIORITY_DELIVERED";
+  logger::debug("[SUPPRESSION-EVENT] %s source=%s seq=%u dest=%s rssi=%d overheard=%u backoff=%ums", typeStr,
+                nodeName(evt.source), static_cast<unsigned>(evt.sequence), nodeName(evt.destination), evt.rssi,
+                static_cast<unsigned>(evt.overheardCount), static_cast<unsigned>(evt.backoffMs));
+  telemetry::onSuppressionEvent(evt);
+}
+
 // Registers ESP-NOW peers for this node's direct topology neighbors (see
 // neighborsOf() in core/node_id.h), skipping any whose MAC hasn't been
 // filled in yet. Real MACs don't exist until hardware is flashed — see
@@ -183,6 +203,8 @@ void setup() {
   anomaly::setEventCallback(onAnomalyEvent);
   reliability::init();
   reliability::setEventCallback(onReliabilityEvent);
+  suppression::init();
+  suppression::setEventCallback(onSuppressionEvent);
 #if ENABLE_UCB1
   ucb1::init();
 #endif
@@ -204,6 +226,7 @@ void loop() {
   predictor::tick();
   anomaly::tick();
   reliability::tick();
+  suppression::tick();
   apptraffic::tick();
   telemetry::tick();
   oled::tick();

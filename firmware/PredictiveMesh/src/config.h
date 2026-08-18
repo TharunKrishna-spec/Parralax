@@ -54,7 +54,7 @@
 // re-check with a real I2C scanner - oled::init() already fails soft
 // (logs a warning, leaves the display dark) rather than hanging, so a
 // wrong value here does not block boot.
-#define OLED_I2C_ADDRESS_C 0x78
+#define OLED_I2C_ADDRESS_C 0x3C
 
 // ============================================================
 // ROUTING (Phase 1)
@@ -421,6 +421,75 @@
 // every real I2C transaction this skips is time NOT spent blocking
 // app::loop() from getting back to routing::tick()/reliability::tick().
 #define OLED_REFRESH_MIN_INTERVAL_MS 400
+
+// ============================================================
+// PRIORITY BROADCAST SUPPRESSION (opportunistic broadcast + overhearing +
+// RSSI-aware counter-based spatial suppression — replaces the previous
+// forced-unicast priority delivery for pkt.priority=1 traffic; see
+// src/suppression/ and docs/decisions.md).
+//
+// All values below are initial, hand-picked starting points — NOT
+// experimentally validated against real RF behavior (no hardware exists
+// yet to validate against). Expected to be re-tuned once real hardware
+// bring-up is possible. See docs/decisions.md and docs/hardware-readiness.md.
+// ============================================================
+
+// Fixed-size bound on concurrently-tracked priority-broadcast identities
+// (one entry per in-flight (source, sequence) this node has seen). The
+// priority trigger is a rare, one-shot Serial event (see apptraffic.cpp),
+// not a continuous stream, so a handful of concurrent in-flight packets is
+// a generous real bound for this 5-node topology — matches this project's
+// established small-fixed-array convention (RELIABILITY_MAX_PENDING=4,
+// RELIABILITY_DUP_CACHE_SIZE=16).
+#define SUPPRESSION_CACHE_SIZE 8
+
+// How many OTHER nodes' rebroadcasts this node must overhear before it
+// suppresses its own scheduled rebroadcast. 1 (not 2+) is deliberately
+// chosen for THIS specific fixed 5-node topology: from A, only B and C are
+// direct first-ring relay candidates (see core/node_id.h::neighborsOf());
+// requiring 2 independent confirmations would rarely if ever trigger
+// suppression here, defeating the mechanism's purpose. Matches the
+// milestone's own described demo behavior exactly: "One node forwards.
+// Other nodes overhear the forwarding and suppress themselves."
+#define SUPPRESSION_THRESHOLD 1
+
+// RSSI-aware backoff bounds, in milliseconds. Stronger/closer RSSI waits
+// longer (SUPPRESSION_MAX_BACKOFF_MS); weaker/farther RSSI fires sooner
+// (SUPPRESSION_MIN_BACKOFF_MS), giving a farther node — plausibly better
+// positioned to extend coverage — the earlier opportunity to relay. Both
+// bounds are comfortably above one-hop ESP-NOW round-trip time (single-
+// digit ms in practice) so a real radio/processing delay is never
+// mistaken for a scheduling error.
+#define SUPPRESSION_MIN_BACKOFF_MS 80
+#define SUPPRESSION_MAX_BACKOFF_MS 400
+
+// Randomized jitter added on top of the RSSI-banded backoff (uniform
+// [0, SUPPRESSION_JITTER_MAX_MS)), so two nodes that happen to hear the
+// same transmission at similar RSSI don't schedule identical deadlines and
+// both transmit simultaneously. Deliberately small relative to the
+// MIN/MAX backoff spread so RSSI banding still dominates the ordering.
+#define SUPPRESSION_JITTER_MAX_MS 60
+
+// RSSI banding thresholds (dBm) for the backoff heuristic — a spatial
+// heuristic only, never claimed to mathematically guarantee optimal
+// coverage (see docs/decisions.md). No existing absolute-RSSI-dBm
+// convention exists elsewhere in this project to reuse (the predictor
+// layer works in relative EWMA/slope terms, not banded absolute RSSI) —
+// these are typical ESP32/Wi-Fi RSSI ranges (roughly -30dBm very close to
+// -90dBm at the edge of range), not derived from any project constant.
+// At or above STRONG -> full SUPPRESSION_MAX_BACKOFF_MS; at or below WEAK
+// -> full SUPPRESSION_MIN_BACKOFF_MS; linearly interpolated in between.
+#define SUPPRESSION_RSSI_STRONG_DBM (-55)
+#define SUPPRESSION_RSSI_WEAK_DBM (-75)
+
+// How long a cache entry survives after its identity was last touched
+// (created, overheard again, or decided). Comfortably longer than the
+// worst-case real flood-settling window (MAX_BACKOFF + JITTER + radio/
+// processing slack, well under 1s) so a legitimate late overhear is never
+// evicted mid-flood, while still bounded so a stray delayed duplicate long
+// after the fact starts a fresh, independent (and still per-node-single-
+// shot) evaluation rather than reviving a stale one.
+#define SUPPRESSION_CACHE_TTL_MS 4000
 
 // ============================================================
 // SERIAL

@@ -2,15 +2,29 @@
 
 > **Note (2026-08-18):** `gui-main/gui-main/mesh-command-console.html` (the
 > file this matrix was originally audited against) was replaced with
-> `mesh-command-console (1).html`. The field-by-field mappings below
-> remain accurate — the replacement GUI's core telemetry parser
+> `mesh-command-console (1).html`, then later renamed back to the plain
+> `mesh-command-console.html` (its current, real filename on disk — the
+> `(1)` suffix is gone). The field-by-field mappings below remain
+> accurate — the current file's core telemetry parser
 > (`applyTelemetryCore()`) is character-for-character identical to the
-> original `applyTelemetry()` this matrix cites — but it is no longer the
-> literal file on disk. See
+> original `applyTelemetry()` this matrix cites, aside from the one
+> authorized `case'PACKET':break;` fix (see decisions.md). See
 > [full-system-audit.md](full-system-audit.md)'s Phase 12 for the fresh
 > audit of what the replacement GUI adds on top (and one real gap: its own
 > manual documents a `PACKET` message type and several `EVENT` names
 > firmware doesn't implement).
+>
+> **Note (2026-08-18, presentation-focused pass):** a new, additive
+> "judge summary" panel (`#judgeSummary`) was added on top of this same
+> contract — real per-node `role`/`status` (from `HELLO`/`NODE_STATUS`,
+> already covered below), real independent POT/LDR `healthState` (from
+> two separately-tagged `SENSOR_STATUS` messages, already covered below),
+> and a persistent self-heal/link-degraded status line driven by
+> `ROUTE_UPDATE`/`EVENT` (`LINK_DEGRADING`/`NODE_SILENT`/
+> `TIMEOUT_FALLBACK`'s real `source` field). No new message type, no new
+> field, no firmware change — see
+> [decisions.md](decisions.md#presentation-focused-gui-pass--judge-summary-panel-added-to-mesh-command-consolehtml)
+> and [testing.md](testing.md#presentation-focused-gui-pass--judge-summary-panel-2026-08-18).
 
 Audited against `gui-main/gui-main/docs/gui-telemetry-contract.md` ("Firmware
 <-> GUI Telemetry Contract v1", `FROZEN`, revision `1.0`) and against the
@@ -208,6 +222,72 @@ every node's real sensor data is sent and stored regardless.
 | `routing::NEIGHBOR_SILENT` (2026-08-18, new — routing.cpp's own existing `ROUTING_ENTRY_TIMEOUT_MS` sweep, no second timeout system) | `NODE_SILENT` (2026-08-18, new) | real |
 | `predictor::LINK_DEGRADING`, only when `routing::getCandidates()` shows a real, different viable candidate not via the degrading neighbor | `REROUTE_PROPOSED` (2026-08-18, new) | real — never fired merely because a score changed; see decisions.md |
 | *(none in firmware)* | `NODE_JOIN` / `NODE_LEAVE` | **no firmware source exists** — routing tracks neighbor liveness but fires no discrete "first contact" event distinct from ordinary beacon traffic; not fabricated, flagged as a real gap |
+| `suppression::broadcastPriority()` (real successful `transport::send()` at origination) | `PRIORITY_BROADCAST` (2026-08-18, priority-broadcast milestone, new) | real — GUI-verified this pass, see below |
+| `suppression::onPacketReceived()`, genuine relay rebroadcast overheard (`prevHop != source`), whether or not this entry is already decided | `PRIORITY_OVERHEARD` (2026-08-18, new) | real — GUI-verified this pass |
+| `suppression::tick()`, this node's own backoff expired below `SUPPRESSION_THRESHOLD` | `PRIORITY_FORWARD` (2026-08-18, new) | real — GUI-verified this pass |
+| `suppression::tick()`, this node's own backoff expired at/above `SUPPRESSION_THRESHOLD` | `PRIORITY_SUPPRESSED` (2026-08-18, new) | real — GUI-verified this pass; **never means packet loss**, see below |
+| `suppression::onPacketReceived()`, first genuine reception at the real destination | `PRIORITY_DELIVERED` (2026-08-18, new) | real — GUI-verified this pass |
+
+**`PRIORITY_ROUTE` is now dead code in practice (2026-08-18):** the row
+above ("`routing::ROUTE_SELECTED` (priority only)") describes real code
+that still exists and still compiles, but nothing calls
+`routing::getNextHop()`/`selectNextHop()` with `priority=true` anymore —
+`apptraffic.cpp`'s priority branch now calls
+`suppression::broadcastPriority()` instead of
+`reliability::send(..., priority=true)`, and priority-broadcast packets
+never reach `reliability::handleData()`'s forwarding path either (see
+`docs/decisions.md`'s priority-broadcast entry). This EVENT type will not
+fire from real firmware going forward. Not removed (still a real, honest
+description of what the code does if it were ever called), just flagged
+as unreachable in the current architecture — the GUI's own
+`PRIORITY_OVERRIDE`-matching HUD branch (see the reconciliation table's
+"not reconciled by name" row) was already dormant before this milestone
+and remains so.
+
+### Priority-broadcast milestone (2026-08-18) — verified in the live GUI, not just "the parser doesn't crash"
+
+All five `PRIORITY_*` `eventType` values ride the pre-existing, generic
+`0x08 EVENT` message — confirmed by reading the real, current
+`telemetry.cpp::onSuppressionEvent()` before writing anything, not
+assumed. **One real, easy-to-get-wrong schema fact, verified from the
+actual code:** `EVENT.payload.source` is ALWAYS the priority packet's
+*original* sender (e.g. `"A"`) on all five event types, regardless of
+which physical node is reporting the event — `envelope.nodeId` (the
+top-level `nodeId` field, not inside `payload`) is the *reporting* node
+and is the field that must be used to attribute an OVERHEARD/FORWARD/
+SUPPRESSED/DELIVERED event to the correct physical node. (`details.
+currentNode`, present on OVERHEARD/FORWARD/SUPPRESSED, is a redundant
+real confirmation of the same value.) Getting this backwards would have
+silently misattributed every relay/suppression/delivery event to node A
+in a live multi-node demo.
+
+**Found genuinely missing, not just "parser accepts it":** before this
+pass, the GUI had zero code referencing any `PRIORITY_BROADCAST`/
+`_OVERHEARD`/`_FORWARD`/`_SUPPRESSED`/`_DELIVERED` string anywhere
+(confirmed by `grep -o "PRIORITY_[A-Z]*"` against the live script before
+any edit — the only match was the old `PRIORITY_OVERRIDE`). The generic
+EVENT case already logged and timelined every one of the five safely (no
+parser crash, no PARSE WARNING) — but that is not the same as the new
+broadcast/overhear/suppress/deliver mechanism being legible as what it
+actually is. **Fixed:** a new, additive, real-telemetry-only "Priority
+broadcast · live flow" panel (`#priorityFlow`, hidden until a real
+`PRIORITY_BROADCAST` arrives) plus a lightweight violet node-pulse
+(`.priority-pulse`, reusing the pre-existing violet "priority traffic"
+legend color) — see `docs/decisions.md` for the exact functions added
+(`handlePriorityEvent`/`renderPriorityFlow`/`pulsePriorityNode`) and full
+reasoning, including why this deliberately does NOT reuse the topology's
+existing edge/route-highlight visual language (a flood is not a routed
+path — highlighting specific edges would misrepresent it as one).
+`PRIORITY_SUPPRESSED` renders with the SAME neutral/muted styling as
+"stood down," never the red failure color used elsewhere for real
+failures — a deliberate choice so it can never read as packet loss.
+Verified against real firmware-generated JSON (the exact scenario from
+this pass's audit request — `A BROADCAST -> B/C OVERHEARD -> D FORWARD ->
+B/C SUPPRESSED -> S DELIVERED`, interleaved across 4 distinct real
+`nodeId`s) run through the entire real, unmodified extracted `<script>`
+block: 25/25 checks passed, zero PARSE WARNING entries across 13 real/
+malformed/unknown-eventType/missing-field messages. See
+`docs/testing.md`.
 
 ### EVENT vocabulary reconciliation (2026-08-18) — every value the replacement GUI's manual documents, cross-checked
 
@@ -226,6 +306,11 @@ every node's real sensor data is sent and stored regardless.
 | `SENSOR_FAILURE` (manual's `ANOMALY_STUCK`) | real flatline/stale/invalid | `telemetry.cpp::onAnomalyEvent()` | `{reason,durationMs?}` | GUI's `SENSOR_STATUS healthState==FLATLINE` decision HUD | host + real harness |
 | `REROUTE_PROPOSED`/`RECOVERY` (manual names) vs. this project's `ROUTE_CHANGE`/`(none)` | — | — | — | **not reconciled by name** — the replacement GUI's own code checks `eventName==='PRIORITY_OVERRIDE'`/`==='RECOVERY'` in a few decision-HUD branches that this project's real `eventType` strings (`PRIORITY_ROUTE`, and no discrete recovery EVENT at all — see `LINK_RECOVERED`/`SENSOR_RECOVERED` above) don't literally match; those specific HUD popups stay dormant, not fabricated. A real, documented, non-blocking naming gap — see decisions.md |
 | `PACKET_SENT`/`PACKET_DELIVERED` (manual names, as EVENT types) | — | — | — | this project reports these as the new `0x0B PACKET` message's own `status` field instead (`SENT`/`DELIVERED`), not as separate EVENT eventTypes — a deliberate design choice (see decisions.md), not a gap |
+| `PRIORITY_BROADCAST` (2026-08-18) | a real successful `transport::send()` at priority-broadcast origination | `suppression.cpp::broadcastPriority()` -> `telemetry.cpp::onSuppressionEvent()` | `{sequence,destination}`, `source`="A" | new `#priorityFlow` panel resets to a fresh flow, adds a BROADCAST step at the real originating node, violet node-pulse | host (`suppression_core`, 55/55) + real GUI-parser harness (this pass, 25/25) |
+| `PRIORITY_OVERHEARD` (2026-08-18) | a genuine relay rebroadcast overheard (`prevHop != source`) — never the original transmission | `suppression.cpp::onPacketReceived()` -> `telemetry.cpp::onSuppressionEvent()` | `{sequence,rssi,overheardCount,currentNode}`, `source`=original sender | flow panel adds an OVERHEARD step at `envelope.nodeId` (NOT `payload.source`), violet node-pulse | host + real harness |
+| `PRIORITY_FORWARD` (2026-08-18) | this node's own RSSI-aware backoff expired with `overheardCount < SUPPRESSION_THRESHOLD` | `suppression.cpp::tick()` -> `telemetry.cpp::onSuppressionEvent()` | `{sequence,overheardCount,threshold,backoffMs,currentNode}`, `source`=original sender | flow panel adds a FORWARD step (green), violet node-pulse | host + real harness |
+| `PRIORITY_SUPPRESSED` (2026-08-18) | this node's own backoff expired with `overheardCount >= SUPPRESSION_THRESHOLD` — another relay already covered it | `suppression.cpp::tick()` -> `telemetry.cpp::onSuppressionEvent()` | `{sequence,overheardCount,threshold,currentNode}`, `source`=original sender | flow panel adds a SUPPRESSED step, deliberately styled NEUTRAL (muted), never red/failure — must never read as packet loss | host + real harness (explicitly checked: `cls==='suppressed'`, never a failure class) |
+| `PRIORITY_DELIVERED` (2026-08-18) | the real destination's first genuine reception of this identity | `suppression.cpp::onPacketReceived()` -> `telemetry.cpp::onSuppressionEvent()` | `{sequence,appSeq?,potValue?,ldrValue?}` (pot/ldr omitted if the real payload didn't decode — never fabricated), `source`=original sender | flow panel adds a DELIVERED step and marks the flow complete (✓ in the meta line) | host + real harness, including the missing-optional-field (decode-failure) case |
 
 ## `0x0B PACKET` (2026-08-18, new)
 

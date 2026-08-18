@@ -5,6 +5,7 @@
 #include "../core/node_id.h"
 #include "../anomaly/anomaly.h"
 #include "../reliability/reliability.h"
+#include "../suppression/suppression.h"
 #include <Arduino.h>
 
 namespace {
@@ -49,7 +50,15 @@ void sendOne(uint32_t now) {
     return;
   }
 
-  bool inFlight = reliability::send(decision.destination, payload, len, decision.priority);
+  // Priority-broadcast milestone (2026-08-18): PRIORITY traffic now goes
+  // through the opportunistic broadcast + overhear + RSSI-aware
+  // suppression path (src/suppression/) instead of reliability::send()'s
+  // forced-unicast override - a deliberate, user-confirmed replacement,
+  // not an addition alongside it (see docs/decisions.md). NORMAL traffic
+  // is completely unchanged: still reliability::send(), still unicast,
+  // still ACK/retry/PDR exactly as before.
+  bool inFlight = decision.priority ? suppression::broadcastPriority(payload, len)
+                                     : reliability::send(decision.destination, payload, len, false);
   logger::info("[APPTRAFFIC] TX appSeq=%u dest=%s class=%s pot=%u ldr=%u in_flight=%d",
                static_cast<unsigned>(appSeq), nodeName(decision.destination),
                decision.priority ? "PRIORITY" : "NORMAL", static_cast<unsigned>(pot.raw_value),

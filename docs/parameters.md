@@ -194,6 +194,26 @@ reason), the `ewmaAlpha`/`endToEndLatencyMs` field-naming caveats, and why
 Priority trigger (a single Serial `'p'`/`'P'` byte read on `NODE_A`) has no
 numeric parameter — see
 [decisions.md](decisions.md#priority-traffic-trigger-a-single-serial-character-pp-read-on-node_a-not-a-new-command-protocol).
+**As of 2026-08-18, this trigger's packet now goes through
+`src/suppression/` (broadcast) instead of `reliability::send()` (unicast)
+— see the table immediately below.**
+
+## Priority-broadcast suppression (2026-08-18 milestone — replaces the previous unicast priority override)
+
+All values below are initial, hand-picked starting points — **not**
+experimentally validated against real RF behavior (no hardware exists yet
+to validate against). See
+[decisions.md](decisions.md#priority-broadcast-milestone-opportunistic-broadcast--overhearing--rssi-aware-counter-based-suppression--replaces-the-previous-unicast-priority-override)
+for the full reasoning behind every value below.
+
+| Parameter | Location | Value | Notes |
+|---|---|---|---|
+| `SUPPRESSION_CACHE_SIZE` | `src/config.h` | `8` entries | Fixed bound on concurrently-tracked priority-broadcast identities. The trigger is a rare, one-shot Serial event, not a stream — generous for this topology. |
+| `SUPPRESSION_THRESHOLD` | `src/config.h` | `1` | How many OTHER nodes' rebroadcasts this node must overhear before suppressing its own. Chosen specifically for this 5-node topology's real first-ring relay count (2, from A: B and C) — a higher threshold would rarely trigger suppression at all here. |
+| `SUPPRESSION_MIN_BACKOFF_MS` / `SUPPRESSION_MAX_BACKOFF_MS` | `src/config.h` | `80` / `400` ms | RSSI-aware backoff bounds — weak/far RSSI fires at MIN (soonest), strong/near RSSI waits until MAX (longest), linearly interpolated between the RSSI thresholds below. |
+| `SUPPRESSION_JITTER_MAX_MS` | `src/config.h` | `60` ms | Random jitter (`esp_random() % this`) added on top of the RSSI-banded backoff, so two nodes at similar RSSI don't collide. |
+| `SUPPRESSION_RSSI_STRONG_DBM` / `SUPPRESSION_RSSI_WEAK_DBM` | `src/config.h` | `-55` / `-75` dBm | RSSI banding thresholds for the backoff heuristic. No existing absolute-RSSI-dBm convention exists elsewhere in this project (predictor works in relative EWMA/slope terms) — these are typical ESP32/Wi-Fi ranges, not derived from any other project constant. |
+| `SUPPRESSION_CACHE_TTL_MS` | `src/config.h` | `4000` ms | Cache entry lifetime, measured from last touch. Comfortably longer than the worst-case real flood-settling window (MAX_BACKOFF + JITTER + radio/processing slack, well under 1s). |
 
 ## OLED (local display — Nodes S and C only)
 

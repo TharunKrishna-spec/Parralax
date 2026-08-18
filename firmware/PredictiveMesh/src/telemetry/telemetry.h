@@ -4,6 +4,7 @@
 #include "../predictor/predictor.h"
 #include "../anomaly/anomaly.h"
 #include "../reliability/reliability.h"
+#include "../suppression/suppression.h"
 
 // ============================================================
 // Reporting layer (implementation-guide.html §01, §07 "Reporting Layer") —
@@ -41,6 +42,7 @@ void onRouteEvent(const routing::RouteEvent& evt);
 void onLinkEvent(const predictor::LinkEvent& evt);
 void onAnomalyEvent(const anomaly::AnomalyEvent& evt);
 void onReliabilityEvent(const reliability::ReliabilityEvent& evt);
+void onSuppressionEvent(const suppression::SuppressionEvent& evt);
 
 // Emits a real ERROR message (Part J: no fabricated error taxonomy) for a
 // genuine firmware fault. `code` and `message` must be fixed string

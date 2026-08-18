@@ -3700,3 +3700,841 @@ outside `gui-main/`.
   affected by this pass.
 - **Impact:** Documentation only.
 - **Phase/date:** Full implementation pass, 2026-08-18.
+
+## Presentation-focused GUI pass — judge summary panel added to `mesh-command-console.html`
+
+- **Context:** User explicitly asked to make the GUI's primary view
+  understandable "in 10 seconds" for judges — node identity/role, sensor
+  anomaly state, and self-healing route status — without hiding or
+  deleting the deep engineering telemetry (EXPERT view stays intact),
+  and without fabricating any value not backed by real firmware
+  telemetry. Explicit, detailed, repeated authorization was given this
+  turn to edit the GUI file directly (12-section spec, "read the entire
+  file before changing anything," "give me exact files changed") — a
+  second, much broader exception to CLAUDE.md's standing "do not edit
+  anything under `gui-main/`" rule, alongside the earlier single-line
+  `case'PACKET':break;` fix (see the "PACKET parse-warning" entry above).
+  Both exceptions are logged here explicitly; neither is a standing
+  precedent for unprompted future `gui-main/` edits.
+- **What was actually found before touching anything (see also
+  `docs/gui-compatibility-matrix.md`):** the working-tree GUI file had
+  already been substantially reworked by its owner since the last
+  session's `(1)`-suffixed version — the file was found renamed to the
+  plain `mesh-command-console.html`, un-committed, and a `git diff`
+  against the last committed `(1)` version showed the owner had
+  independently: (a) force-hidden the "decision HUD" pop-up
+  (`.decision-hud{display:none!important}`), (b) removed the
+  ABS/ACDS/AS route-string whitelist from `applyTelemetryCore`'s
+  `ROUTE_UPDATE` handling in favor of accepting any real `hops` array,
+  (c) generalized the anomaly-flag handling away from a hardcoded
+  `nodeId==='C'` check to a real `state.flagNode=raw.nodeId`, and (d)
+  removed a hardcoded `'B'` fallback in the NODE_SILENT/TIMEOUT_FALLBACK
+  node-failure highlighting. All of this materially reduced the gap this
+  pass needed to close — it is the GUI owner's own work, not this
+  session's.
+- **Real gaps verified against the current file + the real telemetry
+  contract (not assumed from any prior audit):**
+  1. The topology SVG only ever labels nodes with their bare letter
+     (`<text>A</text>`); the one panel that did show real per-node
+     `role`/`status` (`#nodeGrid`, fed by real HELLO/NODE_STATUS
+     `role`/`status` fields — already transmitted per
+     `gui-telemetry-contract.md` lines 47/88/127) lives inside
+     `.firmware-grid`, which is hidden by `.demo-mode` CSS — i.e. the
+     default judge-facing view had no node-role/online display at all.
+  2. `SENSOR_STATUS` is genuinely emitted twice per interval, once per
+     sensor (`sensorId:"pot"` / `"ldr"`, confirmed in
+     `telemetry.cpp`'s `TELEMETRY_SENSOR_INTERVAL_MS` block), each with
+     its own independent `healthState`. The GUI already stored both
+     independently in `state.firmware.sensors.pot`/`.ldr`, but the only
+     rendered widget (`#flag`/`#flagText`) collapses whichever arrived
+     last into one combined CLEAN/SPIKE/STUCK badge — POT and LDR were
+     never shown as two independent readouts anywhere.
+  3. `setRoute()` sets `state.network='RECOVERING'` on any real hop
+     change and nothing ever transitions it back to `'HEALTHY'` — after
+     a real self-heal the network state would sit on "RECOVERING"
+     forever with no settle point and no "self-healed" confirmation.
+     With the decision-hud force-hidden, the "LINK DEGRADED" /
+     "REROUTED" narrative that used to live in that popup was not
+     visible anywhere else on the page.
+- **What was verified NOT a gap (checked, not assumed):** `#route`/
+  `#activeRoute` already reflect the real `ROUTE_UPDATE.active.hops`
+  array dynamically (the owner's own fix, item (b) above) — no
+  hardcoded-route-string work was needed here, unlike what an earlier
+  session's audit of the previous file version had found.
+- **Node role terminology — deliberately NOT "C = SENSOR":** the user's
+  own request used `A=SOURCE, B=RELAY, C=SENSOR, D=RELAY, S=SINK`. Real
+  firmware (`core/node_id.h`) only has three routing roles —
+  `ROLE_SOURCE`/`ROLE_RELAY`/`ROLE_SINK` — and Node C's real role is
+  `ROLE_RELAY` (it routes A→C→D→S as the alternate path), transmitted
+  as `"role":"RELAY"` over the wire exactly like B and D. There is no
+  `ROLE_SENSOR`. Per CLAUDE.md's explicit instruction to preserve real
+  firmware terminology rather than invent it, the new node strip shows
+  each node's real transmitted/fixed role (`SOURCE`/`RELAY`/`RELAY`/
+  `RELAY`/`SINK`) — never a fabricated "SENSOR" role. Node C is
+  additionally, separately marked with a `.js-sensor-demo` highlight
+  (a cyan border, not a role label) because `implementation-guide.html`
+  §07/§08 and this project's own OLED work independently establish C as
+  the real, physically-wired node for the live anomaly demo ("twist the
+  pot on Node C" — Hour 17 sync milestone, final demo flow table) — a
+  real, doc-grounded fact shown as a highlight, not a routing-role
+  relabel. All 5 boards actually run the same anomaly-detection code on
+  their own local ADC pins (`main.cpp` calls `anomaly::sample()`/`tick()`
+  unconditionally, not gated by `THIS_NODE_ID`), so the sensor panel's
+  header and per-row `NODE {id}` label are driven by whichever real
+  node's `SENSOR_STATUS` last arrived (`state.flagNode`, an existing
+  mechanism, reused not reinvented) — C is the documented default/
+  expected source, never a hardcoded one.
+- **Implementation — additive only, nothing removed:** one new `<style
+  id="judge-summary-theme">` block and one new `<section class="panel
+  judge-summary" id="judgeSummary">` inserted immediately before the
+  existing `.firmware-grid` section (outside every `.demo-mode
+  {display:none}` selector, so it stays visible in DEMO/EXPLAIN/EXPERT
+  alike); a new `renderJudgeSummary()` function (reads only
+  `state.firmware.nodes`/`.sensors`/`.route` and `state.network` — no
+  new telemetry parsing, no new fields invented) called from the
+  existing `render()` requestAnimationFrame loop; five small, additive
+  edits to already-existing functions to thread through data
+  `renderJudgeSummary()` needed but the file didn't yet retain
+  (`state.degradingNeighbor` captured from the real EVENT `source`
+  field in the `LINK_DEGRADING`/`NODE_SILENT`/`TIMEOUT_FALLBACK`
+  branches of `applyTelemetry()`; `state.recoverSettleAt` timestamped in
+  `setRoute()`'s existing RECOVERING branch; a 4-second RECOVERING→
+  HEALTHY auto-settle check in `render()`, styled after the file's own
+  existing time-boxed UI flourishes — `oldRouteFlashUntil` (900ms),
+  `priorityUntil` (2200ms) — not a new pattern). No firmware file was
+  touched — every value the panel shows was already present on the wire
+  per `gui-telemetry-contract.md`; this was proven, not assumed, before
+  writing any code (see verification below).
+- **Node-role fallback (`ROLE_FALLBACK` JS constant) is not fabricated
+  data:** it's a direct client-side transcription of `core/node_id.h`'s
+  own fixed `nodeTable()` (`A→SOURCE, B/C/D→RELAY, S→SINK`), used only
+  before the first real HELLO/NODE_STATUS arrives for that node — the
+  same category of fact as the topology SVG's own hardcoded node
+  letters, which the file already displays before any telemetry
+  connects. Live ONLINE/STALE/OFFLINE status and both sensor readouts
+  are never given a fallback value — they render literally `—` until
+  real telemetry arrives, honoring the user's explicit "do not fabricate
+  anomaly values" instruction.
+- **Simulation mode:** the new node-role/status strip and POT/LDR
+  readout are deliberately left unpopulated (`—`) in pure `state.mode
+  ==='sim'`, even though the rest of the page (route, link score, the
+  pre-existing single `#flag` badge) already renders a fully simulated
+  story under the page-wide `SIM ●` badge. Sim mode has no per-node or
+  per-sensor model to draw from (`action('2')`/`action('3')` only ever
+  set one combined `state.flag`), and inventing one would mean showing
+  numbers with no real firmware basis — rejected as exactly the kind of
+  fabrication section 3/8 of the request explicitly prohibits. The
+  self-heal/route/network-state part of the new panel does work in sim
+  mode, because it is wired through the same real `setRoute()`/
+  `state.network` chokepoint the simulation already drives (no separate
+  sim-only code path was added).
+- **Verification (real, not just reasoned about):** (1) `node --check`
+  on the extracted `<script>` block — clean. (2) A throwaway generator
+  (`gen_judge_summary.cpp`, scratchpad-only) linked against the real,
+  unmodified `telemetry_core.cpp` to produce genuine HELLO/ROUTE_UPDATE/
+  SENSOR_STATUS/EVENT JSON for a realistic degrade→reroute→anomaly→
+  silent-neighbor→recovery sequence. (3) A Node harness
+  (`judge_summary_check.mjs`, scratchpad-only) loaded the **entire real,
+  unmodified extracted `<script>` block** (not a hand-copied excerpt —
+  eliminates transcription risk) inside a generic DOM/timer/canvas stub,
+  fed it the real generated JSON through the real `applyTelemetry()`,
+  and asserted on the resulting DOM text/class state: 16/16 checks
+  passed, including — real roles for all 5 nodes, real ONLINE status
+  from real HELLO, POT independently reading ANOMALY while LDR
+  independently stayed NORMAL from two separately-tagged real
+  `SENSOR_STATUS` messages, the degraded route (`A → C → D → S`)
+  appearing right after the real `ROUTE_UPDATE`, `NODE_SILENT(B)`
+  producing "⚠ NODE B UNAVAILABLE" from the real EVENT `source` field
+  (not a hardcoded name), and the final real `ROUTE_RECOVERY`
+  `ROUTE_UPDATE` settling the route back to `A → B → S` with a
+  "✓ SELF-HEALED" confirmation. (4) Whole-file HTML tag-balance check
+  (style/script/section/div/aside open vs. close counts) — balanced,
+  no duplicate new IDs. The full ESP32 firmware build and host test
+  suite were not re-run because no firmware file was touched this pass.
+- **Alternatives considered:** (a) Re-enabling the force-hidden
+  decision-hud popup instead of a persistent status line. (b) Building a
+  per-node-and-per-sensor sensor matrix (5 nodes × 2 sensors) instead of
+  the single POT/LDR pair keyed by whichever node last reported.
+- **Why alternatives were rejected:** (a) the owner's `!important` hide
+  was deliberate and recent (present in the un-committed working-tree
+  file, not something this session did) — overriding it was judged a
+  bigger, less-minimal change than adding a small persistent line, and
+  risked undoing an intentional simplification decision already made by
+  the file's actual owner. (b) `state.firmware.sensors` is keyed only by
+  `sensorId`, not by `(nodeId, sensorId)` — the single-node-serial demo
+  path (the realistic primary hardware test scenario) never has more
+  than one real node's sensors in flight at once, so a 10-cell matrix
+  would mostly show 8 empty cells while adding real complexity; flagged
+  below as a known limitation for the multi-node-bridge case instead of
+  silently working around it.
+- **Known limitation carried forward (not fixed this pass):** in a
+  multi-node-bridge demo (`tools/multi-node-bridge.py`), every one of
+  the 5 real boards independently samples and reports its own POT/LDR
+  (anomaly detection is unconditional in `main.cpp`, not gated by
+  `THIS_NODE_ID`) — if more than one board's `SENSOR_STATUS` is in
+  flight at once, `state.firmware.sensors.pot`/`.ldr` last-write-wins
+  across nodes. The panel always labels the reading with its real
+  `nodeId` (never silently claims it's C when it isn't), so this is
+  honest, not misleading — but a presenter relying on the bridge with
+  multiple boards' potentiometers live at once could see the reading
+  flip to a different real node's value. Not a concern for the primary,
+  realistic single-board-connected demo path.
+- **Files changed:** `gui-main/gui-main/mesh-command-console.html` only.
+  No firmware file touched.
+- **Phase/date:** Presentation-focused GUI pass, 2026-08-18 (not
+  phase-numbered — a GUI-only pass, like the OLED pass and the earlier
+  PACKET parse-warning fix).
+
+## Priority-broadcast milestone: opportunistic broadcast + overhearing + RSSI-aware counter-based suppression — replaces the previous unicast priority override
+
+- **Context:** New, explicitly-requested capability, NOT a bug fix or a
+  gap-fill of `implementation-guide.html`'s own architecture. A full audit
+  (see below) was required before any code was written, and one real
+  architectural conflict was found and explicitly confirmed with the user
+  before implementation began (see "Guide deviation" below) — the user
+  answered "Replace" when asked whether this should replace or run
+  alongside the existing unicast priority path.
+
+### What the audit found (before writing any code)
+
+- `MeshPacket` (`core/packet.h`) already carries `priority` as a 1-bit
+  flag on every packet, deliberately NOT a separate `MessageType` (see
+  "`priority` is a packet field, not a separate `MessageType`" above) —
+  and `(source, sequence)` was already the established packet-identity
+  shape (`reliability_core::PacketId`).
+- ESP-NOW broadcast was already live: `routing.cpp::sendBeacon()` already
+  broadcasts HELLO/HEARTBEAT via `transport::send(BROADCAST_MAC, ...)`,
+  and `transport::addBroadcastPeer()` is already called once at boot
+  (`main.cpp::setup()`). RSSI was already exposed per-received-packet
+  (`transport::RxEvent::rssi`, real hardware value from
+  `info->rx_ctrl->rssi`), already consumed by the predictor layer.
+- `main.cpp::onTransportRx()` already dispatches every received packet to
+  `routing::onPacketReceived()`/`predictor::onPacketReceived()`/
+  `reliability::onPacketReceived()` — but **every one of those three
+  already does its full processing synchronously inside the ESP-NOW
+  receive callback today**, not deferred to the main loop. There was no
+  existing async-dispatch queue this milestone could plug into.
+- **The existing priority mechanism was not a broadcast mechanism at
+  all.** `pkt.priority=1` meant: `reliability::send(dest, payload, len,
+  true)` → `routing::getNextHop(dest, priority=true)` →
+  `routing_core::selectNextHop(..., priority=true, ...)` picks the
+  minimum-hop candidate over ALL candidates including the priority-only
+  A↔S edge (`routing_core::isPriorityOnlyEdge`) — i.e. forces the direct,
+  weak A→S unicast hop — then goes through the **exact same unicast
+  ACK/retry pipeline as NORMAL traffic**. `implementation-guide.html`
+  §5.3 describes priority *only* this way ("a priority flag ... forces
+  shortest-hop"); its own acceptance criteria are literally "priority
+  packet forces the weak direct A–S link" / "a normal packet and a
+  priority packet visibly take different routes." **The guide never
+  mentions broadcast, overhearing, or suppression anywhere.**
+- A directly-relevant existing decision was found: `docs/decisions.md`
+  twice already (Phase 1, Phase 4 — see "No TTL/hop-count field added to
+  `MeshPacket` in Phase 1" and "Forwarding loop prevention relies on
+  routing_core correctness...no new TTL field" above) declined to grow
+  `MeshPacket`'s wire format for loop prevention, reasoning that routing-
+  table correctness + a `nextHop != prevHop` guard + the duplicate filter
+  already bound loops for **unicast, hop-by-hop** forwarding in this
+  5-node topology. `docs/protocol.md` explicitly documents the two
+  `_reserved` padding bytes as "not spare capacity for casual use." That
+  reasoning is scoped to unicast forwarding and does not automatically
+  extend to a broadcast flood (where the SAME identity is legitimately
+  received by multiple nodes at once — that's the overhearing mechanism
+  working as intended, not evidence of a bug) — so it needed a fresh,
+  explicit decision for this milestone rather than either blindly reusing
+  or blindly overriding the old one. See "Loop prevention" below.
+
+### Guide deviation — confirmed with the user, not silently resolved
+
+- **Decision:** Priority traffic (`apptraffic_core::TrafficClass::PRIORITY`,
+  triggered by the existing one-shot Serial `'p'`/`'P'` key on NODE_A) now
+  goes through opportunistic broadcast + overhear + RSSI-aware suppression
+  (`src/suppression/`) INSTEAD OF `reliability::send()`'s forced-unicast
+  override. This is a real, deliberate deviation from
+  `implementation-guide.html` §5.3.
+- **Reason:** Asked explicitly via a direct architecture question before
+  writing any code (per this milestone's own "STOP and report the
+  conflict before making a large change" instruction and CLAUDE.md's
+  "ask before redesigning" rule) — the user chose "Replace" over "add as a
+  third, separately-triggered path." Per this project's own established
+  precedent for a real, confirmed hardware/architecture fact that
+  contradicts the guide (see the OLED SSD1306/SH1106 controller-mismatch
+  entries above), this is documented here and in
+  `docs/known-issues.md` rather than silently resolved in either
+  direction.
+- **Impact:** `implementation-guide.html`'s own priority-override
+  acceptance criteria ("priority packet forces the weak direct A–S link")
+  no longer literally describe what firmware does for priority traffic —
+  the mesh no longer routes priority traffic at all; it floods it via
+  broadcast with RSSI-aware relay suppression. NORMAL traffic's routing
+  (including the A↔S priority-only-edge EXCLUSION for normal traffic,
+  `routing_core::isPriorityOnlyEdge`) is completely untouched — only what
+  `pkt.priority=1` traffic DOES on the wire changed.
+- **Phase/date:** Priority-broadcast milestone, 2026-08-18.
+
+### Packet identity: `(source, sequence)`, reusing the existing shape, NOT the existing counter
+
+- **Decision:** A priority broadcast is identified by `(source, sequence)`
+  — `suppression_core::PacketId`, field-for-field identical in shape to
+  `reliability_core::PacketId` (Part 4 of this milestone's spec: "if the
+  existing MeshPacket sequence + source ... is sufficient, reuse it").
+  `suppression_core.h` defines its OWN local `PacketId` struct rather than
+  including `reliability_core.h`, to keep every `*_core` module mutually
+  independent — the same convention `routing_core`/`predictor_core`/
+  `anomaly_core` already follow (none of them include each other either).
+  Sequence numbers for priority broadcasts come from a NEW, separate
+  counter (`suppression_core::State::nextSeqCounter` /
+  `suppression_core::nextSequence()`) — a fourth, deliberately distinct
+  identity axis alongside `reliability_core`'s own per-source counter
+  (NORMAL `MSG_DATA`), `apptraffic_core`'s application-level `appSeq`, and
+  the GUI telemetry envelope's own `seq`. None of the four are conflated.
+- **Reason:** `MSG_PRIORITY_BROADCAST` and `MSG_DATA` are now two fully
+  disjoint `MessageType`s/pipelines (see "New `MessageType`" below) — their
+  sequence numbers are never compared against each other for ANY purpose
+  (duplicate detection, ACK matching, etc.), so two independent counters
+  cannot collide in any way that matters, and reusing `reliability_core`'s
+  counter would have required threading a cross-module call into a
+  counter that module doesn't currently expose for this purpose.
+- **Cross-reboot identity — deliberately NOT disambiguated on the wire:**
+  `(source, sequence)` alone cannot tell a genuine duplicate apart from a
+  same-numbered post-reboot repeat (the sequence counter resets to 0 on
+  every boot, with no persistent storage anywhere in this project). This
+  is the SAME limitation `reliability_core::PacketId` already accepts for
+  every NORMAL packet today — not a new or worse risk. A wire-level
+  boot-salt was considered (see "Alternatives considered" below) and
+  rejected. `test_suppression_core.cpp`'s
+  `test_same_sequence_no_boot_disambiguation_is_a_known_limitation()`
+  documents this real, current behavior explicitly rather than silently
+  omitting the milestone's own requested test case (see
+  `docs/testing.md`).
+- **Alternatives considered:** (a) A wire-level boot-salt, repurposing
+  `MeshPacket`'s `_reserved1` padding bytes (2 bytes, currently keeping
+  `timestamp_ms` 4-byte-aligned) to carry a per-boot random value
+  (`esp_random()`-seeded, mirroring how `telemetry.cpp` already generates
+  its own `bootId` string). (b) A brand-new `sourceNodeId + messageId`
+  identity scheme, independent of `MeshPacket.sequence` entirely.
+- **Why alternatives were rejected:** (a) `docs/protocol.md` explicitly
+  documents both `_reserved` fields as alignment padding, "not spare
+  capacity for casual use" — repurposing one for this milestone specifically
+  would have been the first wire-format growth since Phase 0, for a
+  cross-reboot edge case this project's own reliability layer already
+  accepts unaddressed, ahead of any actually-observed problem (the exact
+  standard this project has consistently applied — see the two existing
+  TTL decisions above). Revisit only if real hardware testing ever shows
+  this collision actually happening. (b) Part 4 of this milestone's own
+  spec explicitly warns against introducing `sourceNodeId + messageId`
+  "without first checking the existing packet identity system" — the
+  existing one (`source, sequence`) is sufficient and already established,
+  so a parallel identity scheme would violate "we want ONE coherent packet
+  architecture" (Part 3) for no real gain.
+- **Impact:** `suppression_core.h`'s `PacketId`/`State::nextSeqCounter`.
+  No `MeshPacket` field changes.
+
+### New `MessageType`: `MSG_PRIORITY_BROADCAST` — not `MeshPacket.priority=1` on `MSG_DATA`
+
+- **Decision:** A fourth `MessageType` value, `MSG_PRIORITY_BROADCAST = 3`
+  (`core/message_types.h`), distinct from reusing `MSG_DATA` with
+  `priority=1` (which is what the OLD unicast priority path did).
+- **Reason:** Traced exactly what would happen if priority-broadcast
+  packets stayed `MSG_DATA`: `main.cpp::onTransportRx()` dispatches every
+  received packet to `reliability::onPacketReceived()` unconditionally,
+  which gates only on `pkt.type` (`MSG_ACK` vs `MSG_DATA`), not on
+  `pkt.priority`. A `MSG_DATA` priority-broadcast packet overheard by a
+  non-destination relay (e.g. B, C, or D) would ALSO be handed to
+  `reliability::handleData()`, which would (a) send an unwanted unicast
+  `MSG_ACK` back to whoever it thinks `prev_hop` is, (b) consume a
+  `reliability_core` duplicate-cache slot for a packet reliability was
+  never supposed to see, and — most seriously — (c) since the receiving
+  node isn't the packet's destination, attempt to **unicast-forward it
+  toward S via `routing::selectNextHop()`**, creating exactly the "two
+  competing priority mechanisms active" the milestone spec explicitly says
+  to avoid. A distinct `MessageType` is what lets `main.cpp`'s dispatch
+  route priority-broadcast packets to `suppression::onPacketReceived()`
+  ONLY, never reaching `reliability::onPacketReceived()`'s `MSG_DATA`
+  branch at all (its dispatch is `if (type==MSG_ACK) ... else if
+  (type==MSG_DATA) ...` — `MSG_PRIORITY_BROADCAST` matches neither, so
+  `reliability.cpp` needed zero code changes for this to be safe).
+  `pkt.priority` is still set to `1` on these packets too (semantically
+  still true, and keeps any code that reads `pkt.priority` for
+  trafficClass reporting working unchanged) — the new `MessageType` is
+  what drives the actual behavioral dispatch, not a replacement for the
+  flag.
+- **Why this doesn't repeat the `docs/decisions.md#priority-is-a-packet-field-not-a-separate-messagetype`
+  precedent's own reasoning:** That decision rejected a `MessageType` per
+  priority/type COMBINATION (`MSG_PRIORITY_DATA`, hypothetically also
+  `MSG_PRIORITY_ACK`, etc. — "every future switch over `MessageType` would
+  also have to handle the priority/non-priority cross product"). This
+  milestone needs exactly ONE new leaf value for a genuinely new WIRE
+  BEHAVIOR (broadcast+overhear+suppress, no ACK, no unicast forwarding) —
+  not a combinatorial product with existing types.
+- **Impact:** `core/message_types.h` (+1 enum value, `messageTypeName()`
+  updated). `routing::onPacketReceived()`/`predictor::onPacketReceived()`
+  needed zero changes — both already process every packet type
+  unconditionally (routing refreshes neighbor liveness for `prev_hop`
+  regardless of type; predictor samples RSSI for `prev_hop` regardless of
+  type) — overhearing a priority broadcast incidentally contributes a
+  harmless extra RSSI sample to predictor's per-neighbor table for
+  whichever node relayed it, even if that relay isn't a "real" static
+  topology neighbor of the receiver; `routing_core::selectNextHop()` never
+  uses a non-adjacent predictor entry, so this is inert, not a route-
+  selection risk. `reliability.cpp` needed zero changes (verified by
+  construction, not just reasoning — see `docs/testing.md`).
+
+### Suppression algorithm — counter-based, identity-driven, no ACK
+
+- **Decision:** `src/suppression/suppression_core.h/.cpp` (pure, host-
+  testable) implements: on receiving a priority broadcast, distinguish
+  "this is the true original transmission" (`prevHop == id.source`, never
+  counted as overhear evidence per Part 9) from "this is a relay's genuine
+  rebroadcast" (`prevHop != id.source`, always counted, even if it's the
+  very first copy this node ever heard of that identity). A brand-new
+  identity schedules an RSSI-aware backoff deadline (unless this node is
+  the real destination, in which case it's settled immediately — Part 12).
+  When the deadline arrives (`suppression_core::tickDecisions()`, called
+  from `suppression::tick()` in the main loop, never from the RX
+  callback): `overheardCount < SUPPRESSION_THRESHOLD` → TRANSMIT (relay
+  it), else → SUPPRESS (stay silent). Each cache entry is decided AT MOST
+  ONCE — `decided=true` is permanent for that entry's lifetime, so no
+  identity a node has already relayed or suppressed can ever trigger a
+  second transmission from that same node, at any later time (verified by
+  `test_own_origination_not_self_overheard`/
+  `test_local_destination_never_scheduled_to_transmit`/
+  `test_expired_then_new_entry_is_independent_and_single_shot`).
+- **RX-callback discipline (Part 6):** `suppression::onPacketReceived()`
+  does only bounded, allocation-free work (identify the packet, cache
+  lookup/insert, compute the backoff deadline) — it never transmits and
+  never makes the transmit-or-suppress decision. That is entirely
+  `suppression::tick()`'s job (main-loop-driven). This is a genuinely NEW
+  discipline for this codebase — `routing`/`predictor`/`reliability`'s own
+  `onPacketReceived()` hooks already do their FULL processing (including,
+  for reliability, real `transport::send()` calls for ACKs and forwards)
+  synchronously inside the ESP-NOW callback today, an already-accepted
+  pattern this project has used since Phase 1. This milestone holds itself
+  to the stricter standard the spec explicitly asked for, rather than
+  copying the more permissive existing precedent, because a suppression
+  decision genuinely benefits from being deferred (the RSSI-banded
+  backoff is specifically designed to let time pass before deciding,
+  which the ACK-based modules never needed).
+- **Impact:** New module, `src/suppression/`. `main.cpp::onTransportRx()`
+  gains one new dispatch line; `main.cpp::loop()` gains one new
+  `suppression::tick()` call; `main.cpp::setup()` gains
+  `suppression::init()`/`setEventCallback()`.
+
+### RSSI-aware backoff — a spatial heuristic, not a coverage guarantee
+
+- **Decision:** `suppression_core::computeBackoffMs(rssi, jitterMs)` —
+  bounded linear interpolation between `SUPPRESSION_MIN_BACKOFF_MS` (at or
+  below `SUPPRESSION_RSSI_WEAK_DBM`, fires soonest) and
+  `SUPPRESSION_MAX_BACKOFF_MS` (at or above `SUPPRESSION_RSSI_STRONG_DBM`,
+  waits longest), plus caller-supplied jitter added on top
+  (`esp_random() % SUPPRESSION_JITTER_MAX_MS`, computed in the adapter so
+  the core function stays pure/deterministic and host-testable with
+  hand-picked jitter values — see `test_jitter_bounded`).
+- **Reason:** A farther/weaker-RSSI node is plausibly better positioned to
+  extend real coverage, so it should get the earlier opportunity to relay
+  — this is a real, documented, but explicitly NOT mathematically-proven
+  heuristic (Part 8: "do not claim this mathematically guarantees optimal
+  coverage" — honored literally; nothing in this codebase or its
+  documentation claims otherwise). No existing absolute-RSSI-dBm
+  convention exists elsewhere in this project to reuse — the predictor
+  layer works in relative EWMA/slope/link-score terms, never banded
+  absolute RSSI — so `SUPPRESSION_RSSI_STRONG_DBM`/`_WEAK_DBM` are new,
+  hand-picked, typical-ESP32-Wi-Fi-range constants (roughly -30dBm very
+  close to -90dBm at the edge of range), explicitly marked as initial/
+  tunable in `config.h`'s own comments, not experimentally validated (no
+  hardware exists yet to validate against).
+- **Impact:** `config.h`'s new `SUPPRESSION_*` constants.
+
+### Cache — fixed-size, no dynamic allocation, TTL-bounded
+
+- **Decision:** `suppression_core::State::cache[SUPPRESSION_CACHE_SIZE]`
+  (default 8), one entry per in-flight `(source, sequence)` identity, each
+  holding: identity, RSSI at first hearing, overheard count, scheduled
+  deadline, decided/decision, local-destination flag, and a last-touched
+  timestamp TTL is measured from. The adapter (`suppression.cpp`) owns two
+  parallel fixed arrays the pure core doesn't need: `g_cachedPackets[]`
+  (the raw `MeshPacket` bytes needed to actually retransmit — mirrors
+  `reliability.cpp::g_pendingPackets[]` exactly, same "a resend needs the
+  original bytes, which only the adapter has any business owning"
+  reasoning) and `g_scheduledBackoffMs[]` (for accurate `PRIORITY_FORWARD`
+  telemetry once time has passed and the raw deadline alone can't recover
+  the original backoff duration).
+- **Reason for the size/threshold/timing values:** all in `config.h`'s own
+  comments, summarized: `SUPPRESSION_CACHE_SIZE=8` — the priority trigger
+  is a rare, one-shot Serial event, not a continuous stream, so this is a
+  generous real bound, matching the project's established small-fixed-
+  array convention (`RELIABILITY_MAX_PENDING=4`,
+  `RELIABILITY_DUP_CACHE_SIZE=16`). `SUPPRESSION_THRESHOLD=1` — this
+  specific 5-node topology only has TWO real first-ring relay candidates
+  from A (B and C — see `core/node_id.h::neighborsOf()`); requiring 2+
+  confirmations would rarely if ever trigger suppression here, defeating
+  the mechanism's purpose. Matches the milestone's own described demo
+  behavior verbatim ("One node forwards. Other nodes overhear the
+  forwarding and suppress themselves."). `SUPPRESSION_MIN/MAX_BACKOFF_MS`
+  (80/400) and `SUPPRESSION_JITTER_MAX_MS` (60) — comfortably above
+  real one-hop ESP-NOW round-trip time (single-digit ms), snappy enough
+  for a live demo, jitter deliberately small relative to the backoff
+  spread so RSSI banding still dominates ordering.
+  `SUPPRESSION_CACHE_TTL_MS=4000` — comfortably longer than the worst-case
+  real flood-settling window (MAX_BACKOFF + JITTER + radio/processing
+  slack, well under 1s), so a legitimate late overhear is never evicted
+  mid-flood.
+- **Impact:** `config.h`'s new `SUPPRESSION_*` constants; new parallel
+  arrays in `suppression.cpp`.
+
+### Loop prevention — identity-based single-shot decisions only, no new TTL/hop-count field
+
+- **Decision:** No `MeshPacket` field changes for loop prevention. The
+  suppression cache's own "each entry is decided (transmitted or
+  suppressed) at most once, ever, for its full TTL lifetime" rule is the
+  sole loop-prevention mechanism.
+- **Reason:** Revisits, rather than blindly reuses or blindly overrides,
+  the two existing TTL decisions (Phase 1, Phase 4 — see above), which
+  were explicitly scoped to unicast hop-by-hop forwarding and never
+  evaluated a broadcast-flood scenario. For THIS specific, small, fixed
+  5-node topology: once a node has decided (relayed or stayed silent) for
+  a given identity, it can never do so again for that identity until the
+  cache entry ages out (`SUPPRESSION_CACHE_TTL_MS`) — bounding any single
+  flood to at most one real transmission per node (at most 5, in the
+  worst case every single node relays). A late/delayed duplicate arriving
+  after real TTL expiry starts a genuinely fresh, but still single-shot,
+  evaluation (Part 10: "delayed duplicates cannot restart a broadcast
+  storm" — verified by `test_expired_then_new_entry_is_independent_and_single_shot`),
+  not a revived one. This mirrors the SAME reasoning pattern (small fixed
+  topology + real bookkeeping already bounds it) this project has already
+  applied twice for the unicast case, extended to the one new fact a
+  broadcast flood introduces (multiple legitimate concurrent receivers)
+  rather than assuming the old reasoning transfers unexamined.
+- **Alternatives considered:** A `hop_count`/TTL field, decremented per
+  relay, dropped at zero — repurposing `MeshPacket`'s `_reserved0` byte
+  (currently pure alignment padding for `sequence`, per `docs/protocol.md`).
+- **Why rejected:** Would be new wire-format growth for a failure mode
+  this topology's own small size plus the suppression cache's own single-
+  shot-per-node rule already bounds — the same "no speculative protocol
+  growth ahead of an actually-observed problem" standard this project
+  has consistently applied to `MeshPacket` since Phase 0. Revisit if real
+  hardware testing (see "Hardware test procedure") ever shows an actual
+  unbounded storm.
+- **Impact:** None on `MeshPacket`. Loop bound lives entirely in
+  `suppression_core`'s cache-decision logic.
+
+### Reliability/PDR interaction — completely disjoint, by construction
+
+- **Decision:** `suppression_core`/`suppression.cpp` never call into
+  `reliability_core`, `reliability::`, or `predictor::onSendResult()`
+  anywhere. Priority-broadcast delivery is never acknowledged, retried, or
+  counted as a unicast ACK, and never touches `reliability_core::Statistics`
+  (`packetsSent`/`packetsDelivered`/`packetsFailed`/etc., surfaced via the
+  GUI's `STATISTICS` message) or `predictor`'s PDR/link-score EWMAs. A
+  priority broadcast's only "delivery confirmation" is the real
+  `PRIORITY_DELIVERED` event fired by the actual destination
+  (`suppression.cpp`) when it genuinely receives the identity for the
+  first time — no fabricated end-to-end confirmation is ever sent back to
+  the originator (A has no way to know for certain its broadcast reached
+  S, beyond what its own local telemetry can observe, which is nothing
+  beyond "I transmitted" — Part 14 explicitly forbids inventing an ACK-
+  style guarantee here).
+- **Verification:** By construction (grep-verifiable: zero references to
+  `reliability_core`/`predictor::onSendResult` anywhere under
+  `src/suppression/`) plus the full existing `reliability_core`/
+  `predictor_core` host-test suites (90/90, 31/31) staying green,
+  unmodified, after this milestone (see `docs/testing.md`).
+- **Impact:** None on `reliability.cpp`/`reliability_core.*`/
+  `predictor.cpp`/`predictor_core.*` — zero lines changed in any of them.
+
+### Routing interaction — priority traffic no longer calls `routing::` at all
+
+- **Decision:** `suppression::broadcastPriority()`/`onPacketReceived()`/
+  `tick()` never call `routing::getNextHop()`, `routing::selectNextHop()`,
+  or any other `routing::`/`routing_core::` function. Priority delivery no
+  longer involves a next-hop decision at all — it's a flood, not a route.
+  NORMAL traffic's routing (`routing::getNextHop(dest, priority=false)`,
+  called from `reliability::send()`) is completely unchanged, including
+  the A↔S priority-only-edge exclusion that still governs NORMAL
+  selection (`routing_core::isPriorityOnlyEdge`) — that logic now only
+  ever matters for `priority=false` calls, since nothing calls
+  `routing::getNextHop(dest, priority=true)` anymore (apptraffic.cpp's
+  priority branch no longer reaches `reliability::send()` at all — see
+  below).
+- **Impact:** `routing.cpp`/`routing_core.*` — zero lines changed. The
+  existing `routing_core` test suite (42/42) stays green, unmodified.
+
+### `apptraffic.cpp` — the one call-site change, NORMAL branch untouched
+
+- **Decision:** `apptraffic.cpp::sendOne()`'s single line
+  `reliability::send(decision.destination, payload, len, decision.priority)`
+  became a branch: `decision.priority ?
+  suppression::broadcastPriority(payload, len) :
+  reliability::send(decision.destination, payload, len, false)`. Sensor
+  sampling, payload encoding (`apptraffic_core::encodeData()`), and the
+  NORMAL branch's arguments are byte-for-byte what they were before this
+  milestone.
+- **Impact:** `apptraffic_core.h/.cpp` — zero changes (still decides
+  NORMAL vs PRIORITY and encodes the payload; has no idea `suppression::`
+  exists, matching the existing "`*_core` modules stay Arduino/transport-
+  free" discipline). `apptraffic.cpp` — one branch. The existing
+  `apptraffic_core` test suite (29/29) stays green, unmodified.
+
+### Telemetry — five new real `EVENT` types, existing message, no GUI change
+
+- **Decision:** `suppression::SuppressionEventType`
+  (`PRIORITY_BROADCAST`/`PRIORITY_OVERHEARD`/`PRIORITY_FORWARD`/
+  `PRIORITY_SUPPRESSED`/`PRIORITY_DELIVERED`) → `telemetry::onSuppressionEvent()`
+  → the EXISTING generic `0x08 EVENT` message (`emitEvent()`, no new
+  telemetry message type, no `telemetry_core.h` changes). Each event fires
+  only on the real condition it names — never merely because a function
+  ran (Part 15): `PRIORITY_BROADCAST` only on a real successful
+  `transport::send()` at origination; `PRIORITY_OVERHEARD` only on a
+  genuine relay rebroadcast (`prevHop != source`), never the original
+  reception; `PRIORITY_FORWARD`/`PRIORITY_SUPPRESSED` only at the real
+  decision moment (`tickDecisions()`'s deadline firing), carrying the real
+  `overheardCount`/`threshold`/`backoffMs` that drove the decision;
+  `PRIORITY_DELIVERED` only at the real destination, only on the first
+  genuine reception of that identity (not on later duplicates/overhears
+  of an already-delivered one). `PRIORITY_DELIVERED` reuses
+  `apptraffic_core::decodeData()` for the real POT/LDR payload — the exact
+  same live-decode precedent `PACKET_RECEIVED` already established, no
+  second decoder.
+- **Why no GUI change was needed:** The GUI's own `applyTelemetryCore()`
+  already has a generic fallback
+  (`default:log('PARSE WARNING',...)`... no — corrected: its `EVENT` case
+  logs ANY `eventType` string via `log(x.eventType||'FIRMWARE EVENT',
+  x.details||x)`, with no whitelist) that safely displays any new
+  `eventType` value in the event log/timeline without any GUI code change
+  — verified by reading the current `mesh-command-console.html`'s
+  `applyTelemetryCore()`/`applyTelemetry()` (see the presentation-focused
+  GUI pass entry above for the exact current file state) before deciding
+  this, not assumed. Matches Part 16's "if the existing GUI already has an
+  appropriate EVENT mechanism, integrate into it."
+- **No `PACKET` (`0x0B`) emission for suppression events:** considered and
+  rejected as unnecessary — `telemetry.cpp::emitPacket()` is tightly
+  coupled to `reliability::ReliabilityEvent`'s shape; adapting it for a
+  second, structurally different event source was more machinery than
+  Part 15's actual requirement ("include useful fields such as packet
+  identity, source, current node, RSSI, backoff, overhear count,
+  suppression threshold, decision, destination") needed — every one of
+  those fields is already in each `EVENT`'s `details` JSON object instead.
+- **Impact:** `telemetry.h` (+1 include, +1 declaration),
+  `telemetry.cpp` (+1 function, ~55 lines). `telemetry_core.h/.cpp`
+  untouched — the existing `telemetry_core` test suite (120/120) stays
+  green, unmodified.
+
+### GUI and OLED — deliberately untouched this milestone
+
+- **Decision:** No GUI file edited. No OLED file edited.
+- **Reason (GUI):** See "Telemetry" above — the existing generic `EVENT`
+  handling already displays the five new event types without any change.
+  Part 16 explicitly requires reporting WHAT/WHY/EXACT FILE/EXACT FUNCTION
+  before any GUI edit "if a GUI change is absolutely necessary" — none was
+  found to be necessary, so none was proposed.
+- **Reason (OLED):** Part 17 explicitly deprioritizes this
+  ("secondary... do not redesign OLED during this milestone"), and no
+  existing OLED screen currently reads anything priority-related that this
+  milestone's changes could have broken (`src/oled/oled.cpp` reads
+  `predictor::linkScore()`/`anomaly`'s sensor state, neither of which this
+  milestone touches). `oled_core`'s existing 22/22 host tests stay green,
+  unmodified.
+- **Impact:** None.
+
+### Host testing
+
+- **Decision:** New `firmware/PredictiveMesh/test/test_suppression_core.cpp`
+  (55 checks, all passing) covering 15 of the milestone's 17 requested
+  cases directly at the pure-core level; the remaining 2 ("broadcast
+  priority does not enter normal unicast ACK/PDR accounting incorrectly",
+  "normal traffic is completely unaffected") are verified by construction
+  (grep-verifiable zero cross-references) plus the full existing 8-suite
+  regression run staying green.
+- **Full existing regression, re-run after every change in this
+  milestone, unmodified and still passing:** routing_core 42/42,
+  predictor_core 31/31, anomaly_core 50/50, reliability_core 90/90,
+  ucb1_core 26/26, telemetry_core 120/120, apptraffic_core 29/29,
+  oled_core 22/22 — 410/410, identical to the pre-milestone baseline. See
+  `docs/testing.md` for exact commands.
+- **Impact:** New test file only. Zero existing test files modified.
+
+### What was NOT done this pass
+
+- **Real ESP32 compile.** `arduino-cli` is not installed in this session's
+  environment (confirmed: absent from both the Bash and PowerShell PATH) —
+  per CLAUDE.md's "no large installs" rule, this was not installed. The
+  exact command to run is in `docs/testing.md`; RAM/flash impact below is
+  an ESTIMATE from struct sizes, not a measured fact, and is reported as
+  such.
+- **Any physical hardware test.** Nothing has been flashed. See "Hardware
+  test procedure" in `docs/testing.md` and `docs/hardware-readiness.md`.
+  **Spatial suppression's actual real-world behavior (which node wins the
+  backoff race, whether RSSI banding actually correlates with useful
+  coverage in this specific physical layout) is NOT proven until it runs
+  on the real five-node hardware** — nothing in this milestone's
+  documentation claims otherwise.
+
+### Files changed / added
+
+- **Added:** `src/suppression/suppression_core.h`,
+  `src/suppression/suppression_core.cpp`,
+  `src/suppression/suppression.h`, `src/suppression/suppression.cpp`,
+  `test/test_suppression_core.cpp`.
+- **Modified:** `src/core/message_types.h` (+1 `MessageType`),
+  `src/config.h` (+`SUPPRESSION_*` constants), `src/main.cpp` (+1 include,
+  +1 dispatch line, +1 event handler, +1 init/callback pair, +1 tick call),
+  `src/apptraffic/apptraffic.cpp` (+1 include, 1 line branched),
+  `src/telemetry/telemetry.h` (+1 include, +1 declaration),
+  `src/telemetry/telemetry.cpp` (+1 function).
+- **Untouched:** `src/routing/*`, `src/predictor/*`, `src/reliability/*`,
+  `src/anomaly/*`, `src/ucb1/*`, `src/oled/*`, `src/core/packet.h`,
+  `src/core/node_id.h`, `src/telemetry/telemetry_core.*`,
+  `src/apptraffic/apptraffic_core.*`, every existing test file, the GUI.
+- **Phase/date:** Priority-broadcast milestone, 2026-08-18.
+
+## Final GUI integration audit — priority overhearing/spatial suppression: a real gap found and fixed, not just "the parser doesn't crash"
+
+- **Context:** Explicit follow-up audit after the priority-broadcast
+  milestone above, with an explicit instruction not to accept "the
+  generic EVENT parser accepts unknown event names" as proof the new
+  capability is correctly represented. Re-read the actual current
+  `telemetry.cpp::onSuppressionEvent()` and the actual current live GUI
+  file (`gui-main/gui-main/mesh-command-console (1).html` — re-checked
+  fresh, not assumed unchanged from the prior session) before concluding
+  anything.
+- **What re-reading the real code found:** `grep -o "PRIORITY_[A-Z]*"`
+  against the live script (before any edit this pass) matched only the
+  old `PRIORITY_OVERRIDE` string — **zero existing code referenced any of
+  the five new `PRIORITY_*` eventTypes.** The generic `case'EVENT':`
+  branch in `applyTelemetryCore()` does log and timeline every one of
+  them safely (confirmed: no parser crash, no PARSE WARNING) — that part
+  of the prior session's "no GUI change needed" reasoning was accurate as
+  far as it went. But a raw log line does not show WHICH node broadcast/
+  overheard/forwarded/suppressed/delivered, does not distinguish the flow
+  from a routed unicast path, and does not visually protect against
+  reading `PRIORITY_SUPPRESSED` as packet loss — none of which the
+  milestone's own explicit representation requirement ("prove the new
+  behavior is correctly represented... if it isn't, FIX IT") was
+  satisfied by. This was a genuine gap, not a false alarm, and it is now
+  fixed, not merely reported.
+- **A real, easy-to-get-wrong schema fact found by reading the actual
+  code (not assumed):** `telemetry.cpp::onSuppressionEvent()` calls
+  `emitEvent(now, eventType, "INFO", nodeName(evt.source), details)` for
+  ALL FIVE event types — `evt.source` is always the priority packet's
+  ORIGINAL sender (e.g. `"A"`), never the node currently reporting the
+  event. Meanwhile `emitEvent()`'s own `envelope(now)` sets the top-level
+  `nodeId` field to `thisNode().name` — the REPORTING node. So for, say,
+  a `PRIORITY_OVERHEARD` fired by node D, the wire JSON has
+  `"nodeId":"D"` at the envelope level but `"payload":{"source":"A",...}`
+  — using `payload.source` to decide "which node does this concern"
+  (an easy, plausible-looking mistake, since several OTHER existing event
+  types in this same GUI — e.g. `NODE_SILENT`/`TIMEOUT_FALLBACK` — DO use
+  `payload.source` that way, correctly, for THEIR OWN different meaning
+  of that field) would have silently misattributed every relay/
+  suppression/delivery event to node A in a live multi-node demo. The fix
+  uses `envelope.nodeId` (`raw.nodeId` in the GUI's own code) as the
+  authoritative "which physical node" field, confirmed correct against
+  real generated telemetry for all 4 non-origin nodes in the test
+  scenario below.
+- **Decision — what was implemented, in
+  `gui-main/gui-main/mesh-command-console (1).html`:**
+  1. A new `PRIORITY_EVENT_TYPES`/`PRIORITY_ROLE_LABEL` lookup and three
+     new functions (`priorityEventDetailText`, `renderPriorityFlow`,
+     `pulsePriorityNode`, `handlePriorityEvent`), inserted immediately
+     after the existing `timeline()` function.
+  2. One new call site in `applyTelemetry()`: `if(raw.type==='EVENT')
+     handlePriorityEvent(raw,payload,eventName);` — additive, does not
+     touch any existing branch.
+  3. A new, additive `state.priorityFlow` object (lazily created on the
+     first real `PRIORITY_BROADCAST`, matching this file's own existing
+     convention for ad-hoc state fields like `state.flagNode`/
+     `state.lastPacket`/`state.timeline` — none of those are in the
+     initial `state={...}` literal either).
+  4. A new HTML section, `<section class="panel priority-flow"
+     id="priorityFlow" hidden>` (hidden until real telemetry populates
+     it — never pre-shown, never simulated), inserted between the
+     existing `.bottom` section and `.event-timeline` section, plus a
+     new `<style id="priority-flow-style">` block, following this file's
+     own established pattern of layering small additive style blocks.
+  5. A lightweight `.node.priority-pulse` CSS animation reusing the
+     PRE-EXISTING violet "priority traffic" legend color (`● VIOLET
+     priority traffic`, already in the visual-legend panel) — no new
+     color introduced, no redesign.
+- **Why NOT reuse the topology's existing edge/route-highlight
+  mechanism:** the milestone's own audit explicitly warns "the GUI must
+  NOT display the priority broadcast as A → B → C → S unless the actual
+  telemetry proves those forwarding events occurred," and this
+  architecture genuinely can't prove a specific hop sequence — a
+  broadcast is heard by whoever is in RF range, not routed hop-by-hop.
+  Reusing the existing cyan/green "active route" edge highlighting for a
+  flood would visually imply a specific routed path the telemetry does
+  not actually establish. The dedicated flow panel instead shows each
+  real event as an unordered-looking list of (node, role, real detail)
+  entries — accurate to what the telemetry actually proves, nothing more.
+- **Why `PRIORITY_SUPPRESSED` gets neutral, not red, styling:** Part 5 of
+  the original priority-broadcast milestone request and this audit's own
+  Part 5 both explicitly require that suppression never be interpreted as
+  packet loss. `.pf-step.pf-suppressed .pf-role{color:var(--muted)}` —
+  the same muted gray already used elsewhere in this file for "no
+  data"/neutral states, never the red used for `.node.failed`/link-
+  failure. Verified explicitly by a dedicated test assertion (see below),
+  not just visual inspection.
+- **Verification (real, not just reasoned about):** (1) `node --check`
+  on the freshly re-extracted `<script>` block — clean. (2) Whole-file
+  HTML tag-balance check (style/script/section/div open vs. close) —
+  balanced; confirmed the earlier `case'PACKET':break;` fix is still
+  present, untouched. (3) A throwaway generator
+  (`gen_priority_gui_audit.cpp`, scratchpad-only) linked against the
+  real, unmodified `telemetry_core.cpp` to produce the exact 7-message
+  scenario this audit's own instructions specified (`A
+  PRIORITY_BROADCAST, B/C PRIORITY_OVERHEARD, D PRIORITY_FORWARD, B/C
+  PRIORITY_SUPPRESSED, S PRIORITY_DELIVERED`, four distinct real
+  `nodeId`s), plus 6 additional robustness cases: a `PRIORITY_DELIVERED`
+  with a missing optional field (real decode-failure shape), an unknown
+  future `eventType`, a `PRIORITY_BROADCAST` with malformed
+  (non-object) `details`, a NORMAL `PACKET` message immediately after
+  priority `EVENT`s (real coexistence), a second later
+  `PRIORITY_BROADCAST` starting a fresh flow, and a stale
+  `PRIORITY_OVERHEARD` for the old, already-superseded sequence arriving
+  late. (4) A Node harness (`priority_gui_audit_check.mjs`, scratchpad-
+  only) loaded the **entire real, unmodified extracted `<script>` block**
+  (not hand-copied) and fed it the real generated JSON through the real
+  `applyTelemetry()`: **25/25 checks passed**, including correct per-node
+  attribution for all 7 real events (proving the `envelope.nodeId`-not-
+  `payload.source` fix works), the neutral `SUPPRESSED` styling, the
+  flow correctly resetting on a new `PRIORITY_BROADCAST` and correctly
+  ignoring a stale event for a superseded sequence, and **zero PARSE
+  WARNING entries across all 13 real/malformed/unknown/missing-field
+  messages**. (5) A regression check re-running the prior session's own
+  broader real-telemetry sequence (HELLO/ROUTE_UPDATE/SENSOR_STATUS/
+  EVENT mix) through this same patched script — no exceptions, route/
+  node-grid/sensor-state all populate correctly, zero new PARSE WARNING
+  entries — confirming no regression to NORMAL-traffic GUI behavior.
+- **Multi-node bridge (`tools/multi-node-bridge.py`):** re-read, unchanged
+  since it was built and real-tested two sessions ago — a pure verbatim
+  line relay that never rewrites `nodeId` or any other field. Since the
+  GUI's own state model is already keyed by real `nodeId` (now confirmed
+  correct for the priority-event family specifically, per the harness
+  above) and the bridge performs zero transformation, the 4-distinct-
+  node interleaved harness test above IS, in effect, exactly what the
+  bridge would deliver to the GUI — not re-run as a separate live
+  WebSocket process this pass (its own multi-socket relay mechanics were
+  already real-tested and are unchanged), but the thing that mechanics
+  feeds into (GUI parsing/state-keying of interleaved multi-node priority
+  events) was freshly verified.
+- **Alternatives considered:** (a) Leave the GUI unchanged, reasoning the
+  generic EVENT handler is "sufficient" since nothing crashes. (b) Reuse
+  the existing topology edges to animate the priority flow, matching the
+  normal-route visual language.
+- **Why rejected:** (a) explicitly rejected by this audit's own framing
+  ("do not tell me GUI is complete simply because the generic EVENT
+  parser accepts unknown event names") and, on inspection, genuinely
+  insufficient — a log line doesn't show per-node attribution, doesn't
+  distinguish flood from route, doesn't protect against
+  suppression-reads-as-loss. (b) rejected per the explicit "must not
+  misleadingly represent priority broadcast as ordinary unicast routing"
+  requirement — see above.
+- **Impact:** `gui-main/gui-main/mesh-command-console (1).html` only —
+  the **third** explicit, user-authorized exception to the standing "do
+  not edit anything under `gui-main/`" rule (after the single-line
+  `PACKET` parse-warning fix and the presentation-focused GUI pass), each
+  individually logged here, none a standing precedent. No firmware file
+  touched. `docs/gui-compatibility-matrix.md` updated with the five new
+  EVENT rows, the reconciliation-table entries, and the now-dead
+  `PRIORITY_ROUTE` note.
+- **Phase/date:** Final GUI integration audit, 2026-08-18 (not
+  phase-numbered — a GUI-only pass).

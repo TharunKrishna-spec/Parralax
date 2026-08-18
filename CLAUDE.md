@@ -143,6 +143,74 @@ run on real hardware** — no display has actually shown a frame yet. See
 `docs/decisions.md`'s OLED integration entry, `docs/testing.md`, and
 `docs/hardware-readiness.md`'s Part 3/4/5.
 
+**Presentation-focused GUI pass (2026-08-18, not phase-numbered — GUI-only,
+no firmware touched):** the judge-facing primary view of
+[`gui-main/gui-main/mesh-command-console.html`](gui-main/gui-main/mesh-command-console.html)
+now shows, additively (nothing removed, EXPERT view untouched), a real
+per-node role/online-status strip, independent real POT/LDR anomaly
+readouts, and a persistent self-heal/link-degraded status line — all
+sourced from telemetry fields that were already on the wire (`role`,
+`status`, two independently-tagged `SENSOR_STATUS` messages,
+`ROUTE_UPDATE`/`EVENT` `source`). This was the **second** explicit,
+narrow, user-authorized exception to the standing "do not edit anything
+under `gui-main/`" rule below (the first was the single-line `PACKET`
+parse-warning fix) — see `docs/decisions.md`'s "Presentation-focused GUI
+pass" entry for the full authorization record, what was verified vs.
+assumed, and why Node C is shown with its real `RELAY` role (not a
+fabricated "SENSOR" role — see that entry for the real-vs-requested
+terminology reconciliation). Verified by running the entire real,
+unmodified extracted `<script>` block against real firmware-generated
+telemetry (16/16 checks) — see `docs/testing.md`. **Also found and
+flagged, not fixed:** `config.h`'s `OLED_I2C_ADDRESS_C` is currently
+`0x3C` in the uncommitted working tree, contradicting the team-confirmed
+`0x78` this file's own OLED section and `docs/known-issues.md` already
+document — needs a real I2C-scanner check before the next Node C flash,
+not a guess in either direction. See `docs/known-issues.md`.
+
+**Priority-broadcast milestone (2026-08-18, not phase-numbered):**
+priority traffic (the existing one-shot Serial `'p'`/`'P'` trigger on
+NODE_A) now goes through a new opportunistic-broadcast + overhearing +
+RSSI-aware counter-based suppression mechanism
+([`src/suppression/`](firmware/PredictiveMesh/src/suppression/)) instead
+of the previous forced-shortest-hop unicast override. **This is a real,
+deliberate, user-confirmed deviation from `implementation-guide.html`
+§5.3** (which only ever describes priority as a routed unicast override —
+never broadcast/overhearing/suppression) — confirmed via an explicit
+architecture question before any code was written, not silently resolved;
+see `docs/known-issues.md`'s top entry and `docs/decisions.md`'s
+priority-broadcast entry for the full record. NORMAL traffic
+(`reliability::send()`, unicast, ACK/retry/PDR, and the A↔S priority-
+only-edge routing exclusion) is byte-for-byte unchanged — verified by
+construction and by the full existing 410/410 host-test regression
+staying green, unmodified. New: `MessageType::MSG_PRIORITY_BROADCAST`
+(a real new wire type, not just `priority=1` on `MSG_DATA` — necessary so
+`reliability::onPacketReceived()` never sees this traffic at all, avoiding
+two competing priority mechanisms); `suppression_core`'s own 55/55 host
+tests. **Real ESP32 compile NOT YET RUN** — `arduino-cli` isn't installed
+in this session's environment; exact command is in `docs/testing.md`.
+**Nothing hardware-verified** — spatial suppression's real-world behavior
+is explicitly not claimed proven until it runs on the real five-node
+hardware (see `docs/testing.md`'s 5-step incremental bring-up procedure).
+
+**Final GUI integration audit for this milestone (2026-08-18, GUI-only, no
+firmware touched):** a real, genuine gap was found and fixed — before
+this pass, zero GUI code referenced any of the five new `PRIORITY_*`
+event types (the generic EVENT handler logged them safely, but that's not
+the same as representing the new broadcast/overhear/suppress/deliver
+mechanism correctly). Fixed with a new, additive, real-telemetry-only
+"Priority broadcast · live flow" panel in
+[`gui-main/gui-main/mesh-command-console (1).html`](gui-main/gui-main/mesh-command-console%20%281%29.html)
+— the **third** explicit, narrow, user-authorized exception to the
+standing "do not edit anything under `gui-main/`" rule below. Verified
+against real firmware-generated JSON run through the entire real,
+unmodified extracted `<script>` block: 25/25 checks, including correct
+per-node attribution (a real, easy-to-get-wrong schema fact: `EVENT.
+payload.source` is always the packet's original sender, never the
+reporting node — `envelope.nodeId` is authoritative) and zero PARSE
+WARNING entries across 13 real/malformed/unknown-eventType/missing-field
+messages. See `docs/decisions.md`'s "Final GUI integration audit" entry
+and `docs/testing.md`.
+
 Full doc set lives in [`docs/`](docs/): `architecture.md`, `decisions.md`,
 `protocol.md`, `parameters.md`, `testing.md`, `phase-log.md`,
 `known-issues.md`, `hardware-readiness.md`, `gui-compatibility-matrix.md`,
@@ -174,7 +242,12 @@ candidates for what comes next (none started, none scoped): physical
 flashing (now unblocked on the software side, including OLED; still needs
 the team's answer on UART/RESET/BOOT pin confirmation — see
 `docs/hardware-readiness.md`). OLED is no longer an open item — `src/oled/`
-is implemented (2026-08-18 pass), just not yet hardware-verified.
+is implemented (2026-08-18 pass), just not yet hardware-verified. Priority
+delivery is also no longer an open item on the software side —
+`src/suppression/` is implemented (2026-08-18 priority-broadcast
+milestone), host-tested, but still needs (a) a real ESP32 compile — the
+user's own `arduino-cli`, command ready in `docs/testing.md` — and (b) the
+same physical bring-up flashing is waiting on generally.
 
 Things worth rereading before starting whatever's next:
 - [`docs/hardware-readiness.md`](docs/hardware-readiness.md) — the real

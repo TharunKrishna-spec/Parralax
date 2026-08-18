@@ -616,6 +616,65 @@ void onReliabilityEvent(const reliability::ReliabilityEvent& evt) {
   }
 }
 
+// Priority-broadcast milestone (2026-08-18). Reuses the existing, generic
+// 0x08 EVENT message (no new message type, no GUI contract change) — the
+// GUI's own applyTelemetryCore() already has a generic fallback that logs
+// any unrecognized eventType safely (see docs/gui-compatibility-matrix.md).
+// Every field here is real: never fabricated because a function merely
+// ran. PRIORITY_DELIVERED reuses apptraffic_core::decodeData() exactly
+// like PACKET_RECEIVED above — no second decoder.
+void onSuppressionEvent(const suppression::SuppressionEvent& evt) {
+  uint32_t now = millis();
+  char details[192];
+
+  switch (evt.type) {
+    case suppression::SuppressionEventType::PRIORITY_BROADCAST:
+      snprintf(details, sizeof(details), "{\"sequence\":%u,\"destination\":\"%s\"}",
+               static_cast<unsigned>(evt.sequence), nodeName(evt.destination));
+      emitEvent(now, "PRIORITY_BROADCAST", "INFO", nodeName(evt.source), details);
+      break;
+
+    case suppression::SuppressionEventType::PRIORITY_OVERHEARD:
+      snprintf(details, sizeof(details), "{\"sequence\":%u,\"rssi\":%d,\"overheardCount\":%u,\"currentNode\":\"%s\"}",
+               static_cast<unsigned>(evt.sequence), evt.rssi, static_cast<unsigned>(evt.overheardCount),
+               thisNode().name);
+      emitEvent(now, "PRIORITY_OVERHEARD", "INFO", nodeName(evt.source), details);
+      break;
+
+    case suppression::SuppressionEventType::PRIORITY_FORWARD:
+      snprintf(details, sizeof(details),
+               "{\"sequence\":%u,\"overheardCount\":%u,\"threshold\":%u,\"backoffMs\":%u,\"currentNode\":\"%s\"}",
+               static_cast<unsigned>(evt.sequence), static_cast<unsigned>(evt.overheardCount),
+               static_cast<unsigned>(SUPPRESSION_THRESHOLD), static_cast<unsigned>(evt.backoffMs), thisNode().name);
+      emitEvent(now, "PRIORITY_FORWARD", "INFO", nodeName(evt.source), details);
+      break;
+
+    case suppression::SuppressionEventType::PRIORITY_SUPPRESSED:
+      snprintf(details, sizeof(details), "{\"sequence\":%u,\"overheardCount\":%u,\"threshold\":%u,\"currentNode\":\"%s\"}",
+               static_cast<unsigned>(evt.sequence), static_cast<unsigned>(evt.overheardCount),
+               static_cast<unsigned>(SUPPRESSION_THRESHOLD), thisNode().name);
+      emitEvent(now, "PRIORITY_SUPPRESSED", "INFO", nodeName(evt.source), details);
+      break;
+
+    case suppression::SuppressionEventType::PRIORITY_DELIVERED: {
+      apptraffic_core::DecodedData decoded{};
+      bool hasDecoded = evt.payload != nullptr && apptraffic_core::decodeData(evt.payload, evt.payloadLen, &decoded);
+      if (hasDecoded) {
+        logger::info("[TELEMETRY] decoded PRIORITY application DATA appSeq=%u pot=%u ldr=%u source=%s",
+                      static_cast<unsigned>(decoded.appSeq), static_cast<unsigned>(decoded.potValue),
+                      static_cast<unsigned>(decoded.ldrValue), nodeName(evt.source));
+        snprintf(details, sizeof(details), "{\"sequence\":%u,\"appSeq\":%u,\"potValue\":%u,\"ldrValue\":%u}",
+                 static_cast<unsigned>(evt.sequence), static_cast<unsigned>(decoded.appSeq),
+                 static_cast<unsigned>(decoded.potValue), static_cast<unsigned>(decoded.ldrValue));
+      } else {
+        snprintf(details, sizeof(details), "{\"sequence\":%u}", static_cast<unsigned>(evt.sequence));
+      }
+      emitEvent(now, "PRIORITY_DELIVERED", "INFO", nodeName(evt.source), details);
+      break;
+    }
+  }
+}
+
 void reportError(const char* code, const char* message, bool recoverable) {
   uint32_t now = millis();
   telemetry_core::ErrorPayload p{ "ERROR", code, message, recoverable };

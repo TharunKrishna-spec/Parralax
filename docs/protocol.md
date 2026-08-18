@@ -70,16 +70,17 @@ full 81-byte frame if the payload is smaller.
 
 ```cpp
 enum MessageType : uint8_t {
-  MSG_HEARTBEAT = 0,  // periodic liveness / link-quality probe between direct neighbors
-  MSG_DATA      = 1,  // application payload (sensor reading, anomaly flag, ...)
-  MSG_ACK       = 2,  // hop-by-hop delivery acknowledgement (§5.4) — Phase 4
+  MSG_HEARTBEAT          = 0,  // periodic liveness / link-quality probe between direct neighbors
+  MSG_DATA               = 1,  // application payload (sensor reading, anomaly flag, ...). Always priority=0.
+  MSG_ACK                = 2,  // hop-by-hop delivery acknowledgement (§5.4) — Phase 4
+  MSG_PRIORITY_BROADCAST = 3,  // opportunistic broadcast + overhear + RSSI-aware suppression (2026-08-18 milestone)
 };
 ```
 
-Three values, matching exactly what implementation-guide.html names: the
-main loop flowchart's "Build outgoing frame (heartbeat / data / priority)"
-step, and §5.4's ACK. No speculative fourth type has been added.
-`MSG_DATA` and `MSG_ACK` are both real and exchanged as of Phase 4 — see
+The first three values match exactly what implementation-guide.html
+names: the main loop flowchart's "Build outgoing frame (heartbeat / data /
+priority)" step, and §5.4's ACK. `MSG_DATA` and `MSG_ACK` are both real
+and exchanged as of Phase 4 — see
 [architecture.md](architecture.md#reliability-layer-phase-4). `MSG_ACK`'s
 payload is `AckWire{source, sequence}` (3 bytes, packed — see
 `src/reliability/reliability.cpp`), identifying which `MSG_DATA` packet is
@@ -87,15 +88,40 @@ being acknowledged; `MSG_ACK` packets are never themselves acknowledged
 (fire-and-forget — see
 [decisions.md](decisions.md#ack-packets-are-fire-and-forget--never-themselves-acknowledged)).
 
+`MSG_PRIORITY_BROADCAST` is the one real deviation from
+implementation-guide.html's own §5.3 architecture — see "`priority`"
+below and
+[decisions.md](decisions.md#priority-broadcast-milestone-opportunistic-broadcast--overhearing--rssi-aware-counter-based-suppression--replaces-the-previous-unicast-priority-override)
+for the full record, including why a distinct `MessageType` (not just
+`priority=1` on `MSG_DATA`) was necessary: it's what lets `main.cpp`'s
+receive dispatch route it to `src/suppression/` only, never reaching
+`reliability::onPacketReceived()`'s `MSG_DATA`/ACK/duplicate-filter/
+forwarding pipeline at all.
+
 ## `priority`
 
-A separate field from `type`, not a fourth `MessageType`. Per §5.3, a
-priority flag is checked independently of the packet's payload type:
-"priority flag set? -> force shortest-hop, ignoring link_score entirely."
-Semantically meaningful on `MSG_DATA` packets; `MSG_HEARTBEAT`/`MSG_ACK`
+A separate field from `type`. Per §5.3, a priority flag is checked
+independently of the packet's payload type: "priority flag set? -> force
+shortest-hop, ignoring link_score entirely." `MSG_HEARTBEAT`/`MSG_ACK`
 traffic ignores it. See
 [decisions.md](decisions.md#priority-is-a-packet-field-not-a-separate-messagetype)
-for the reasoning.
+for the original reasoning.
+
+**Updated, 2026-08-18 (priority-broadcast milestone):** `priority=1` no
+longer means "forced-shortest-hop unicast" in practice — that unicast
+override existed only for `MSG_DATA` packets sent via
+`reliability::send(..., priority=true)`, and nothing calls that anymore
+(`apptraffic.cpp`'s priority branch now calls
+`suppression::broadcastPriority()` instead). `priority=1` is still set on
+`MSG_PRIORITY_BROADCAST` packets (semantically still true, keeps any
+`pkt.priority`-reading code working unchanged), but the actual delivery
+behavior (broadcast, not routed unicast) is driven entirely by
+`pkt.type == MSG_PRIORITY_BROADCAST`, not by this flag. NORMAL traffic
+(`MSG_DATA`, always `priority=0`) is completely unaffected — still
+`reliability::send()`, still unicast, still ACK/retry/PDR exactly as
+before. See the decisions.md entry above for the full guide-deviation
+record (confirmed with the user before implementation, not silently
+resolved).
 
 ## `prev_hop` / `next_hop`
 
@@ -158,6 +184,7 @@ confused:
 | `apptraffic_core`'s `appSeq` | uint16, `NODE_A`-only counter | which application-layer POT/LDR sample this is | encoded inside `MSG_DATA`'s payload bytes; decoded live at the sink as of this pass — see `PACKET.appSeq` in `docs/gui-compatibility-matrix.md` |
 | telemetry envelope `seq` | uint32, per-node, per-boot | which telemetry JSON *message* this is (GUI sequence-gap detection) | every telemetry line's own envelope, distinct from any `MeshPacket` |
 | `PACKET.appTimestampMs` | uint32 | the *originating* node's own `millis()` at the moment `apptraffic::sendOne()` called `encodeData()` | new (2026-08-18), decoded from real payload bytes, distinct from `MeshPacket.timestamp_ms` (rewritten every hop) and from telemetry's own `envelope.timestampMs` (the *reporting* node's local time) |
+| `suppression_core::State::nextSeqCounter` | uint16, per-node | this node's own priority-broadcast sequence counter — a FIFTH identity axis, added 2026-08-18 | `MeshPacket.sequence` on `MSG_PRIORITY_BROADCAST` packets only; deliberately a separate counter from `reliability_core`'s own (NORMAL `MSG_DATA` traffic), even though both ultimately ride the same wire field — see [decisions.md](decisions.md#packet-identity-source-sequence-reusing-the-existing-shape-not-the-existing-counter) |
 
 ## Route-advertisement payload (Phase 1, rides inside `MSG_HEARTBEAT`)
 

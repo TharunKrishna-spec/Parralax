@@ -5,6 +5,257 @@ nothing has been flashed yet, so nothing in this document claims a
 hardware-dependent pass. What follows is exactly what was and wasn't
 validated, and how.
 
+## Final GUI integration audit — priority overhearing/spatial suppression (2026-08-18)
+
+Full record: [decisions.md](decisions.md#final-gui-integration-audit--priority-overhearingspatial-suppression-a-real-gap-found-and-fixed-not-just-the-parser-doesnt-crash).
+GUI-only pass — no firmware file touched, so no host suite/ESP32 compile
+was re-run.
+
+### 1. What was found before any edit
+`grep -o "PRIORITY_[A-Z]*"` against the live, unmodified
+`gui-main/gui-main/mesh-command-console (1).html` script matched only the
+old `PRIORITY_OVERRIDE` string — zero existing code referenced any of the
+five new `PRIORITY_*` eventTypes. The generic EVENT handler already
+logged/timelined them safely (no crash, no parse warning), but that did
+not amount to the new mechanism being legible as a broadcast/overhear/
+suppress/deliver flow, distinct from a routed unicast path. Genuine gap,
+now fixed — see decisions.md for the exact code added.
+
+### 2. Real firmware-generated telemetry through the real, unmodified GUI script
+
+Generator (`gen_priority_gui_audit.cpp`, scratchpad-only) links the real
+`telemetry_core.cpp` and produces the exact 7-message scenario this
+audit's own instructions specified, plus 6 robustness cases (missing
+optional field, unknown eventType, malformed details, NORMAL/PRIORITY
+coexistence, a second flow starting fresh, a stale event for a superseded
+sequence). Harness (`priority_gui_audit_check.mjs`, scratchpad-only) loads
+the entire real, unmodified extracted `<script>` block (not hand-copied)
+and drives it with `applyTelemetry()`.
+
+```
+Script (with priority-flow patch) loaded and executed without throwing.
+...
+25/25 checks passed
+```
+
+Confirmed by real assertion, not inspection: correct per-node attribution
+for all 7 events using `envelope.nodeId` (not `payload.source`, which is
+always the packet's original sender across all 5 event types — a real,
+easy-to-get-wrong schema fact, see decisions.md), `PRIORITY_SUPPRESSED`
+rendered with the neutral `pf-suppressed` class (never a failure/red
+class), the flow panel correctly resetting on a new `PRIORITY_BROADCAST`
+and correctly ignoring a stale event for an old sequence, and **zero PARSE
+WARNING entries across all 13 real/malformed/unknown/missing-field
+messages**.
+
+### 3. Regression check against existing NORMAL-traffic GUI behavior
+
+The prior session's own broader real-telemetry sequence (HELLO,
+ROUTE_UPDATE, SENSOR_STATUS, EVENT mix) re-run through this same patched
+script: zero exceptions, `route`/`nodeGrid`/`sensorState` all populate
+correctly, zero new PARSE WARNING entries. No regression to node status,
+topology, sensor anomaly, or route-update rendering.
+
+### 4. Multi-node bridge
+
+`tools/multi-node-bridge.py` re-read, unchanged since its own real test
+two sessions ago (mock mode + a real Python WebSocket client, all 5
+mock `nodeId`s arrived over one connection) — a pure verbatim relay, zero
+transformation. Not re-run as a live process this pass (its own relay
+mechanics are unchanged); what changed is GUI-side parsing/state-keying
+of interleaved multi-node priority events, which test 2 above verifies
+directly (4 distinct real `nodeId`s in one sequence, correctly kept
+separate).
+
+### 5. Structural checks
+`node --check` on the re-extracted script — clean. Whole-file HTML
+tag-balance (style/script/section/div) — balanced. The earlier
+`case'PACKET':break;` fix confirmed still present.
+
+### 6. What this pass does NOT claim
+Not tested: an actual browser render, an actual live WebSocket/bridge
+connection, or real hardware generating these events. All hardware-
+dependent claims remain `NOT RUN — HARDWARE NOT AVAILABLE`.
+
+## Priority-broadcast milestone — opportunistic broadcast + overhear + RSSI-aware suppression (2026-08-18)
+
+Full architecture record:
+[decisions.md](decisions.md#priority-broadcast-milestone-opportunistic-broadcast--overhearing--rssi-aware-counter-based-suppression--replaces-the-previous-unicast-priority-override).
+
+### 1. Host tests — new suite + full existing regression
+
+```
+$ cd firmware/PredictiveMesh/test
+$ g++ -std=c++17 -Wall -Wextra -I ../src ../src/suppression/suppression_core.cpp test_suppression_core.cpp -o test_suppression_core
+$ ./test_suppression_core
+...
+55/55 checks passed
+```
+
+New suite covers 15 of the milestone's 17 requested test cases directly
+(new-entry creation, duplicate-of-original recognition, overhear-count
+increments — including the case where the very first reception is already
+a relay's copy, transmit-below-threshold, suppress-at-threshold, strong-
+vs-weak RSSI backoff ordering, bounded jitter, cache expiry, a delayed
+duplicate after real expiry starting one fresh single-shot evaluation
+rather than reviving the old one, distinct sequences not confused,
+distinct sources not confused, a node never counting its own
+transmission/origination as an overhear, the real destination never
+scheduling a rebroadcast, honest cache-full reporting, and expired-slot
+reuse). One case (#13, "same sequence from different boot IDs is not
+confused") is deliberately tested as documenting the OPPOSITE of what it
+asks — see `test_same_sequence_no_boot_disambiguation_is_a_known_limitation()`
+and decisions.md's "Packet identity" entry for why no wire-level boot-salt
+was added. Two cases (#16 "broadcast priority does not enter normal
+unicast ACK/PDR accounting incorrectly", #17 "normal traffic is completely
+unaffected") are structural facts about the adapter layer, not something
+a pure-core unit test could prove — verified instead by construction
+(zero references to `reliability_core`/`predictor::` anywhere under
+`src/suppression/`, grep-verifiable) and by the full regression below
+staying green.
+
+**Full existing regression, re-run after every change in this milestone —
+unmodified, still passing, identical counts to the pre-milestone
+baseline:**
+
+```
+routing_core      42/42
+predictor_core     31/31
+anomaly_core       50/50
+reliability_core   90/90
+ucb1_core          26/26
+telemetry_core    120/120
+apptraffic_core    29/29
+oled_core          22/22
+-----------------------
+total             410/410
+```
+
+(`test_anomaly_core.cpp` needs `routing_core.cpp` linked alongside
+`anomaly_core.cpp` — a pre-existing, documented quirk, not something this
+milestone introduced; see the exact command a few sections below.)
+
+### 2. Real ESP32 compilation — NOT YET RUN this pass
+
+`arduino-cli` is not installed in this session's environment (checked
+both the Bash and PowerShell `PATH` — absent from both). Per CLAUDE.md's
+"no large installs" rule, it was not installed by this session. **Marking
+this `NOT RUN — TOOLCHAIN NOT AVAILABLE THIS SESSION`, not claiming
+success.** Exact command to run (matches every prior phase's own
+verification command):
+
+```
+$ arduino-cli compile --fqbn esp32:esp32:esp32 firmware/PredictiveMesh --warnings all
+```
+
+Expect 0 errors/0 warnings if the above reasoning holds; if it doesn't,
+that's a real finding to report back, not something to paper over.
+
+### 3. RAM/flash impact — ESTIMATED from struct sizes, not measured
+
+Since the real compile above hasn't run, these are estimates, explicitly
+not measured facts:
+- New static RAM: `suppression_core::State` (an 8-entry fixed cache,
+  each entry roughly a dozen-plus bytes with natural struct alignment) +
+  `suppression.cpp`'s two parallel arrays (`MeshPacket
+  g_cachedPackets[8]` at 81 bytes each = 648 bytes, plus
+  `uint32_t g_scheduledBackoffMs[8]` = 32 bytes) — on the order of
+  850-950 bytes total, well under 1KB, against the existing firmware's
+  measured ~50KB (15%) of the ESP32's 327KB SRAM (Phase 7.1's last real
+  measurement).
+- New flash: a few KB of compiled code for `suppression_core.cpp`/
+  `suppression.cpp` plus the small wiring changes elsewhere — negligible
+  against the existing ~915-957KB (69-73%) of the 1.31MB partition.
+- **No `MeshPacket` field changes** — the wire frame itself is
+  unchanged, so no existing message type's flash/RAM footprint changes.
+
+### 4. What this pass does NOT claim
+
+Not tested: any real ESP-NOW broadcast, any real RSSI value, any real
+backoff race between real nodes, any real suppression outcome. **Spatial
+suppression's actual real-world behavior is not proven until it runs on
+the real five-node hardware** — see "Hardware test procedure" below and
+`docs/hardware-readiness.md`. All hardware-dependent claims remain
+`NOT RUN — HARDWARE NOT AVAILABLE`.
+
+### 5. Hardware test procedure (once boards are flashed — not yet attempted)
+
+Incremental bring-up, per this milestone's own instructions — do not flash
+all five at once:
+1. Single node (A) — confirm it still boots, still sends NORMAL traffic,
+   and the priority Serial trigger produces a real broadcast (Serial log
+   `[SUPPRESSION] PRIORITY broadcast originated ...`).
+2. A + B — confirm B overhears and, after its RSSI-aware backoff, relays
+   (`[SUPPRESSION] PRIORITY forward ...`).
+3. A + B + S — confirm S receives and reports `PRIORITY_DELIVERED`
+   telemetry with a real decoded POT/LDR payload, and does NOT rebroadcast.
+4. A + B + C + D + S — confirm normal traffic (A→B→S, and the
+   B-degradation reroute to A→C→D→S) is completely unaffected; confirm a
+   priority broadcast triggers overhearing/backoff/suppression across
+   multiple real relays, not just one; confirm no repeating/storm
+   behavior (Serial log should show each node either forward or suppress
+   at most once per identity, never more).
+5. Physical geometry test: place B close to A, C farther, D at another
+   position; fire a priority event from A; observe real RSSI values,
+   real backoff ordering, and real forwarding/suppression decisions in
+   the Serial logs and telemetry — **only after this step can the RSSI
+   heuristic's real-world behavior be reported as observed, not before.**
+
+## Presentation-focused GUI pass — judge summary panel (2026-08-18)
+
+No firmware file was touched this pass (GUI-only), so no host test suite
+or ESP32 compile was re-run — see
+[decisions.md](decisions.md#presentation-focused-gui-pass--judge-summary-panel-added-to-mesh-command-consolehtml)
+for the full rationale and exact code sites changed.
+
+### 1. Extracted-script syntax check
+`node --check` against the live `<script>` block extracted verbatim from
+`gui-main/gui-main/mesh-command-console.html` — clean, no syntax errors.
+
+### 2. Real firmware-generated telemetry through the real, unmodified GUI script
+Same established methodology as the Phase 6/"full implementation pass"
+GUI harnesses, taken one step further: instead of hand-copying function
+bodies (transcription risk), the harness (`judge_summary_check.mjs`,
+scratchpad-only) loads the **entire real extracted `<script>` block** via
+`new Function(...)` inside a generic DOM/canvas/timer stub, and calls the
+real `applyTelemetry()`/`render()` directly. Fed a realistic
+degrade → reroute → sensor-anomaly → silent-neighbor → recovery sequence
+generated by `gen_judge_summary.cpp` (a throwaway host program linking
+the real, unmodified `telemetry_core.cpp` — same pattern as
+`gen_packet_telemetry.cpp`).
+
+**Result: 16/16 checks passed**, including:
+- All 5 nodes render their real transmitted role (`SOURCE`/`RELAY`×3/
+  `SINK`) and real `ONLINE` status from real `HELLO` messages.
+- Node C carries the sensor-demo highlight without its role label being
+  overwritten (`role` stays `RELAY`, matching the real wire value).
+- Two independently-tagged real `SENSOR_STATUS` messages (`sensorId:
+  "pot"` ANOMALY, `sensorId:"ldr"` NORMAL) render as two independent
+  rows — POT and LDR never overwrite each other.
+- The route strip shows `A → C → D → S` immediately after the real
+  degraded `ROUTE_UPDATE`, with a "✓ SELF-HEALED" confirmation.
+- A real `EVENT NODE_SILENT` with `source:"B"` renders "⚠ NODE B
+  UNAVAILABLE" — the neighbor name comes from the real EVENT `source`
+  field, not a hardcoded string.
+- The final real `ROUTE_RECOVERY` `ROUTE_UPDATE` settles the route back
+  to `A → B → S` with the same self-healed confirmation.
+
+### 3. Whole-file structural check
+Balanced `<style>`/`<script>`/`<section>`/`<div>`/`<aside>` open/close tag
+counts across the full file after all edits; confirmed the new `#judge
+Summary`/`#jsNodes` ids appear exactly once each; confirmed the earlier
+session's `case'PACKET':break;` fix is still present (untouched by this
+pass).
+
+### 4. What this pass does NOT claim
+Not tested: real WebSerial/bridge connection, the visual layout in an
+actual browser viewport, or the 4-second RECOVERING→HEALTHY auto-settle
+timer (the harness's `performance.now()` stub is real wall-clock time,
+so the transition is logically present and code-reviewed but wasn't
+waited out synchronously in the test run). All hardware-dependent claims
+remain `NOT RUN — HARDWARE NOT AVAILABLE` per the checklist at the top
+of this file.
+
 ## Full implementation pass — PACKET telemetry, 5 new EVENT types, real lead-time, live decode, multi-node bridge (2026-08-18)
 
 ### 1. Host tests — full regression, all 8 suites

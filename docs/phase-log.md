@@ -1020,3 +1020,95 @@ hardening items not touched this pass (out of scope, not urgent):
 ACK-sender validation and retry-`send()`-return-value checking
 (`docs/full-system-audit.md` section H), and route-advertisement
 neighbor/MAC validation (sections E/B).
+
+## Priority-broadcast milestone — opportunistic broadcast + overhear + RSSI-aware counter-based suppression (not phase-numbered)
+**Date:** 2026-08-18
+**Status:** Software complete and host-tested. Real ESP32 compile and all
+hardware verification NOT YET RUN — see below.
+
+### Objective
+A new, explicitly-requested, incremental capability: replace the previous
+forced-shortest-hop unicast priority override with opportunistic ESP-NOW
+broadcast + overhearing + RSSI-aware backoff + counter-based spatial
+suppression. Explicitly NOT a bug fix or a guide gap-fill — a genuinely
+new capability beyond `implementation-guide.html`'s own §5.3 architecture,
+confirmed as an intentional deviation with the user before implementation
+began (a direct "replace or add alongside?" question — answered
+"replace"). NORMAL traffic (`reliability::send()`, unicast, ACK/retry/PDR)
+is completely unaffected.
+
+### What was built
+- New module `src/suppression/` (`suppression_core.h/.cpp` pure logic +
+  `suppression.h/.cpp` Arduino adapter), mirroring the established
+  `routing_core`/`predictor_core`/`anomaly_core`/`reliability_core` split.
+- New `MessageType::MSG_PRIORITY_BROADCAST` (`core/message_types.h`) —
+  necessary (not just `priority=1` on `MSG_DATA`) so `main.cpp`'s receive
+  dispatch routes priority-broadcast packets to `suppression::` only,
+  never reaching `reliability::onPacketReceived()`'s unicast/ACK/
+  duplicate-filter/forwarding pipeline (which would otherwise create a
+  second, competing priority mechanism).
+- Packet identity: `(source, sequence)`, matching
+  `reliability_core::PacketId`'s existing shape (Part 4's "reuse if
+  sufficient"), with its own separate sequence counter — a documented
+  fifth identity axis alongside `MeshPacket.sequence`/`appSeq`/telemetry
+  `seq`/`appTimestampMs`. No wire-level cross-reboot boot-salt (a
+  deliberate choice, not an oversight — see decisions.md).
+- Counter-based suppression: a node distinguishes the true original
+  transmission (never counted as overhear evidence) from a genuine relay
+  rebroadcast (always counted, even as a node's first-ever reception of
+  an identity); schedules an RSSI-aware backoff; transmits if still below
+  `SUPPRESSION_THRESHOLD` when its own deadline arrives, else suppresses
+  — each identity decided at most once per node, ever.
+- RSSI-aware backoff: bounded linear interpolation (weak/far RSSI fires
+  soonest, strong/near RSSI waits longest) plus bounded random jitter —
+  explicitly documented as a spatial heuristic, never claimed to
+  mathematically guarantee coverage.
+- Fixed-size cache (`SUPPRESSION_CACHE_SIZE=8`), TTL-bounded, no dynamic
+  allocation. Loop prevention relies entirely on the cache's own
+  identity-based single-shot-per-node rule — no new `MeshPacket` TTL/hop-
+  count field (a deliberate revisit, not a repeat, of the same "no
+  speculative wire growth" standard applied twice before for the unicast
+  case — see decisions.md for why that reasoning needed re-examining, not
+  blindly reusing, for a broadcast flood).
+- Five new real `EVENT` types (`PRIORITY_BROADCAST`/`_OVERHEARD`/
+  `_FORWARD`/`_SUPPRESSED`/`_DELIVERED`), reusing the existing generic
+  `0x08 EVENT` telemetry message — no GUI contract change needed (the
+  GUI's own `applyTelemetryCore()` already logs any `eventType` safely).
+  `PRIORITY_DELIVERED` reuses `apptraffic_core::decodeData()` for the real
+  POT/LDR payload, the same live-decode precedent `PACKET_RECEIVED`
+  already established.
+- `apptraffic.cpp`'s priority branch now calls
+  `suppression::broadcastPriority()` instead of `reliability::send(...,
+  priority=true)`; the NORMAL branch is byte-for-byte unchanged.
+
+### What was NOT built / touched
+`src/routing/*`, `src/predictor/*`, `src/reliability/*`,
+`src/anomaly/*`, `src/ucb1/*`, `src/oled/*`, `src/core/packet.h`,
+`src/core/node_id.h`, `src/telemetry/telemetry_core.*`,
+`src/apptraffic/apptraffic_core.*`, the GUI, every existing test file —
+all completely untouched, verified both by construction and by the full
+existing regression suite staying green.
+
+### Testing
+- New `test/test_suppression_core.cpp`: 55/55 checks, covering 15 of the
+  milestone's 17 requested cases directly (the other 2 are adapter-layer
+  structural facts, verified by construction — see docs/testing.md).
+- Full existing regression re-run, unmodified, still green: routing_core
+  42/42, predictor_core 31/31, anomaly_core 50/50, reliability_core
+  90/90, ucb1_core 26/26, telemetry_core 120/120, apptraffic_core 29/29,
+  oled_core 22/22 — 410/410, identical to the pre-milestone baseline.
+- Real ESP32 compile: **NOT RUN this pass** — `arduino-cli` is not
+  installed in this session's environment; the exact command is recorded
+  in docs/testing.md for the user to run.
+- No hardware-dependent validation — nothing has been flashed. Spatial
+  suppression's real-world behavior is explicitly not claimed proven.
+
+### Git
+No commits were made by this session.
+
+### Next (not started, awaiting explicit go-ahead)
+Real ESP32 compile (command ready, needs the user's own `arduino-cli`),
+then incremental hardware bring-up per docs/testing.md's 5-step procedure
+— single node, then A+B, then A+B+S, then all five, then a real physical-
+geometry RSSI test. `docs/known-issues.md` carries the guide-deviation
+flag and the "not yet physically verified" note.

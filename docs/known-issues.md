@@ -1,5 +1,38 @@
 # Known Issues
 
+## Priority delivery deviates from `implementation-guide.html` §5.3 (2026-08-18, confirmed with user, not silently resolved)
+
+As of the priority-broadcast milestone (2026-08-18),
+`implementation-guide.html` §5.3's own description of priority traffic —
+"a priority flag ... forces shortest-hop, ignoring link_score entirely"
+— **no longer describes what firmware does.** Priority traffic
+(`apptraffic_core::TrafficClass::PRIORITY`, the existing one-shot Serial
+`'p'`/`'P'` trigger on NODE_A) now goes through opportunistic broadcast +
+overhear + RSSI-aware counter-based suppression (`src/suppression/`)
+instead of the previous forced-shortest-hop unicast override. The guide
+never mentions broadcast, overhearing, or suppression anywhere — this is
+a genuinely new capability beyond the guide's documented architecture, not
+a bug fix or gap-fill.
+
+This was found during this milestone's mandatory pre-implementation
+architecture audit and explicitly confirmed with the user (a direct
+"replace the existing mechanism, or add a new one alongside it?"
+question) before any code was written — not silently resolved in either
+direction, matching this project's standing rule
+("Do not deviate from the architecture in `implementation-guide.html` ...
+If a real conflict or gap is found, write it into `docs/known-issues.md`
+and ask before redesigning"). See
+[decisions.md](decisions.md#priority-broadcast-milestone-opportunistic-broadcast--overhearing--rssi-aware-counter-based-suppression--replaces-the-previous-unicast-priority-override)
+for the full architecture record. NORMAL traffic's routing (A→B→S, the
+B-degradation reroute to A→C→D→S, and the A↔S priority-only-edge exclusion
+for NORMAL selection) is completely unaffected — only what `priority=1`
+traffic does on the wire changed.
+
+**Not yet physically verified** — see "Hardware test procedure" in
+`docs/testing.md`. Spatial suppression's real-world behavior (which node
+actually wins the RSSI-aware backoff race in this physical layout) is not
+proven until it runs on the real five-node hardware.
+
 ## Physical hardware now exists (2026-08-17) — not yet flashed
 
 Update, Phase 6: 5 physical boards are now in hand (4x ESP32-WROOM-32
@@ -66,6 +99,28 @@ clean, real ESP32 build, both `ENABLE_UCB1` configs) — see
 [decisions.md](decisions.md#oled-integration-per-node-driver-selection-screen-content-and-why-polling-not-a-third-event-callback-slot)
 and [testing.md](testing.md). **Still `NOT RUN — HARDWARE NOT AVAILABLE`**
 on a real display — nothing has been flashed yet.
+
+**OPEN CONTRADICTION, found 2026-08-18, NOT resolved — flagging per
+CLAUDE.md rather than guessing:** the working tree's
+`firmware/PredictiveMesh/src/config.h` currently has
+`#define OLED_I2C_ADDRESS_C 0x3C` (an uncommitted, unstaged change — `git
+diff` shows it was `0x78` at the last commit, matching every statement
+above and in decisions.md about the team's confirmed `0x78` value). The
+surrounding comment block was **not** updated to match — it still reads
+"Node C, 1.3" SH1106 ... 0x78-0x7B is the I2C spec's reserved
+10-bit-addressing prefix range ... kept exactly as team-provided." This
+change did not come from this session (no config.h edit was made before
+this was noticed) and its origin/reasoning is unknown. Two possibilities,
+both plausible: (a) the team re-confirmed a corrected `0x3C` value after
+the `0x78` confirmation this doc already records, and the comment/doc
+update just hasn't happened yet; or (b) the file was accidentally
+reverted toward the pre-team-confirmation `0x3C` inference this doc
+already explains was likely wrong for that specific 1.3" module. **Not
+guessed at or silently fixed either direction** — whoever flashes Node C
+next should confirm the real address with an I2C scanner before trusting
+either value, and this line item should be closed out (comment + this
+doc updated to match, in whichever direction is actually correct) once
+someone with hardware access resolves it.
 
 ## Hardware not currently flashed
 
